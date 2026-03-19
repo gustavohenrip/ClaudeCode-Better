@@ -153,6 +153,12 @@ export class RunManager extends EventEmitter {
     if (options.model) {
       args.push('--model', options.model)
     }
+    if (options.effort) {
+      args.push('--effort', options.effort)
+    }
+    if (options.thinking) {
+      args.push('--thinking', options.thinking)
+    }
     if (options.addDirs && options.addDirs.length > 0) {
       for (const dir of options.addDirs) {
         args.push('--add-dir', dir)

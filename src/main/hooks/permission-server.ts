@@ -442,7 +442,7 @@ export class PermissionServer extends EventEmitter {
     }
 
     const dir = join(tmpdir(), 'clui-hook-config')
-    try { mkdirSync(dir, { recursive: true, mode: 0o700 }) } catch {}
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
 
     const filePath = join(dir, `clui-hook-${runToken}.json`)
     writeFileSync(filePath, JSON.stringify(settings, null, 2), { mode: 0o600 })

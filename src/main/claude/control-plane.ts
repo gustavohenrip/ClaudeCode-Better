@@ -601,8 +601,14 @@ export class ControlPlane extends EventEmitter {
     if (this.permissionServer.getPort()) {
       const runToken = this.permissionServer.registerRun(tabId, requestId, options.sessionId || null)
       this.runTokens.set(requestId, runToken)
-      const hookSettingsPath = this.permissionServer.generateSettingsFile(runToken)
-      options = { ...options, hookSettingsPath }
+      try {
+        const hookSettingsPath = this.permissionServer.generateSettingsFile(runToken)
+        options = { ...options, hookSettingsPath }
+      } catch (err) {
+        log(`Failed to generate hook settings file: ${(err as Error).message} — running without permission hook`)
+        this.permissionServer.unregisterRun(runToken)
+        this.runTokens.delete(requestId)
+      }
     }
 
     tab.activeRequestId = requestId

@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import {
   FileText, PencilSimple, FileArrowUp, Terminal, MagnifyingGlass, Globe,
   Robot, Question, Wrench, FolderOpen, Copy, Check, CaretRight, CaretDown,
-  SpinnerGap, ArrowCounterClockwise, Square,
+  SpinnerGap, ArrowCounterClockwise, Square, Brain,
 } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
@@ -26,6 +26,7 @@ type GroupedItem =
   | { kind: 'assistant'; message: Message }
   | { kind: 'system'; message: Message }
   | { kind: 'tool-group'; messages: Message[] }
+  | { kind: 'thinking'; message: Message }
 
 // ─── Helpers ───
 
@@ -47,6 +48,7 @@ function groupMessages(messages: Message[]): GroupedItem[] {
       flushTools()
       if (msg.role === 'user') result.push({ kind: 'user', message: msg })
       else if (msg.role === 'assistant') result.push({ kind: 'assistant', message: msg })
+      else if (msg.role === 'thinking') result.push({ kind: 'thinking', message: msg })
       else result.push({ kind: 'system', message: msg })
     }
   }
@@ -180,6 +182,8 @@ export function ConversationView() {
                 return <ToolGroup key={`tg-${item.messages[0].id}`} tools={item.messages} skipMotion={isHistorical} />
               case 'system':
                 return <SystemMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
+              case 'thinking':
+                return <ThinkingMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
               default:
                 return null
             }
@@ -784,6 +788,62 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.12 }}
       className="py-0.5"
+    >
+      {inner}
+    </motion.div>
+  )
+}
+
+function ThinkingMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
+  const [expanded, setExpanded] = useState(true)
+  const colors = useColors()
+
+  const inner = (
+    <div
+      className="rounded-lg overflow-hidden"
+      style={{
+        border: `1px solid ${colors.toolBorder}`,
+        background: colors.surfaceHover,
+      }}
+    >
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-left"
+        onClick={() => setExpanded((v) => !v)}
+        style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
+      >
+        {expanded
+          ? <CaretDown size={10} style={{ color: colors.textTertiary, flexShrink: 0 }} />
+          : <CaretRight size={10} style={{ color: colors.textTertiary, flexShrink: 0 }} />
+        }
+        <Brain size={11} style={{ color: colors.textTertiary, flexShrink: 0 }} />
+        <span className="text-[11px]" style={{ color: colors.textTertiary }}>Thinking</span>
+      </button>
+      {expanded && (
+        <div
+          className="px-3 pb-2 text-[11px] leading-[1.6] whitespace-pre-wrap font-mono"
+          style={{
+            color: colors.textTertiary,
+            borderTop: `1px solid ${colors.toolBorder}`,
+            paddingTop: 6,
+            maxHeight: 300,
+            overflowY: 'auto',
+          }}
+        >
+          {message.content}
+        </div>
+      )}
+    </div>
+  )
+
+  if (skipMotion) return <div className="py-1">{inner}</div>
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.12 }}
+      className="py-1"
     >
       {inner}
     </motion.div>

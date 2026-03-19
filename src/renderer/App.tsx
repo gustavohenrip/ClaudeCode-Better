@@ -39,6 +39,10 @@ export default function App() {
   }, [setSystemTheme])
 
   useEffect(() => {
+    const savedMode = useSessionStore.getState().permissionMode
+    if (savedMode !== 'ask') {
+      window.clui.setPermissionMode(savedMode)
+    }
     useSessionStore.getState().initStaticInfo().then(() => {
       const homeDir = useSessionStore.getState().staticInfo?.homePath || '~'
       const tab = useSessionStore.getState().tabs[0]

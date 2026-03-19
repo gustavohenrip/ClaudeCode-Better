@@ -83,9 +83,12 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
       if (delta.type === 'input_json_delta') {
         return [{
           type: 'tool_call_update',
-          toolId: '', // caller can associate via index tracking
+          toolId: '',
           partialInput: delta.partial_json,
         }]
+      }
+      if (delta.type === 'thinking_delta') {
+        return [{ type: 'thinking_chunk', thinking: delta.thinking }]
       }
       return []
     }

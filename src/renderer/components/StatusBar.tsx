@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck } from '@phosphor-icons/react'
+import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain } from '@phosphor-icons/react'
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
-import { useColors } from '../theme'
+import { useColors, useThemeStore, type EffortLevel } from '../theme'
 
 /* ─── Model Picker (inline — tightly coupled to StatusBar) ─── */
 
@@ -248,6 +248,55 @@ function PermissionModePicker() {
   )
 }
 
+/* ─── Effort Badge ─── */
+
+const EFFORT_CYCLE: EffortLevel[] = ['low', 'medium', 'high']
+
+function EffortBadge() {
+  const effort = useThemeStore((s) => s.effort)
+  const setEffort = useThemeStore((s) => s.setEffort)
+  const colors = useColors()
+
+  const handleClick = () => {
+    const idx = EFFORT_CYCLE.indexOf(effort)
+    setEffort(EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length])
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      className="flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors"
+      style={{ color: colors.textTertiary }}
+      title={`Effort: ${effort} — click to cycle`}
+    >
+      <Lightning size={10} weight={effort === 'high' ? 'fill' : 'regular'} style={{ color: effort !== 'medium' ? colors.accent : colors.textTertiary }} />
+      <span style={{ color: effort !== 'medium' ? colors.accent : colors.textTertiary }}>
+        {effort.charAt(0).toUpperCase() + effort.slice(1)}
+      </span>
+    </button>
+  )
+}
+
+/* ─── Thinking Badge ─── */
+
+function ThinkingBadge() {
+  const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
+  const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
+  const colors = useColors()
+
+  return (
+    <button
+      onClick={() => setThinkingEnabled(!thinkingEnabled)}
+      className="flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors"
+      style={{ color: thinkingEnabled ? colors.accent : colors.textTertiary }}
+      title={thinkingEnabled ? 'Thinking enabled — click to disable' : 'Thinking disabled — click to enable'}
+    >
+      <Brain size={10} weight={thinkingEnabled ? 'fill' : 'regular'} />
+      <span>Thinking</span>
+    </button>
+  )
+}
+
 /* ─── StatusBar ─── */
 
 /** Get a compact display path: basename for deep paths, ~ for home */
@@ -434,18 +483,25 @@ export function StatusBar() {
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 
         <PermissionModePicker />
+
+        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+
+        <EffortBadge />
+
+        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+
+        <ThinkingBadge />
       </div>
 
       {/* Right — Open in CLI */}
-      <div className="flex items-center gap-1.5 flex-shrink-0">
+      <div className="flex items-center flex-shrink-0">
         <button
           onClick={handleOpenInTerminal}
-          className="flex items-center gap-1 text-[11px] rounded-full px-2 py-0.5 transition-colors"
+          className="flex items-center justify-center w-5 h-5 rounded-full transition-colors"
           style={{ color: colors.textTertiary }}
-          title="Open this session in Terminal"
+          title="Open in Terminal"
         >
-          Open in CLI
-          <Terminal size={11} />
+          <Terminal size={12} />
         </button>
       </div>
     </div>

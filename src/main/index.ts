@@ -347,78 +347,79 @@ ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }:
 })
 
 ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
-  log(`IPC LIST_SESSIONS ${projectPath ? `(path=${projectPath})` : ''}`)
+  log(`IPC LIST_SESSIONS ${projectPath ? `(path=${projectPath})` : '(all)'}`)
   try {
-    const cwd = projectPath || process.cwd()
-    // Claude stores project sessions at ~/.claude/projects/<encoded-path>/
-    // Path encoding: replace all '/' with '-' (leading '/' becomes leading '-')
-    const encodedPath = cwd.replace(/\//g, '-')
-    const sessionsDir = join(homedir(), '.claude', 'projects', encodedPath)
-    if (!existsSync(sessionsDir)) {
-      log(`LIST_SESSIONS: directory not found: ${sessionsDir}`)
-      return []
-    }
-    const files = readdirSync(sessionsDir).filter((f: string) => f.endsWith('.jsonl'))
+    const projectsRoot = join(homedir(), '.claude', 'projects')
+    if (!existsSync(projectsRoot)) return []
 
-    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number }> = []
-
-    // UUID v4 regex — only consider files named as valid UUIDs
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-    for (const file of files) {
-      // The filename (without .jsonl) IS the canonical resume ID for `claude --resume`
-      const fileSessionId = file.replace(/\.jsonl$/, '')
-      if (!UUID_RE.test(fileSessionId)) continue // skip non-UUID files
-
-      const filePath = join(sessionsDir, file)
-      const stat = statSync(filePath)
-      if (stat.size < 100) continue // skip trivially small files
-
-      // Read lines to extract metadata and validate transcript schema
-      const meta: { validated: boolean; slug: string | null; firstMessage: string | null; lastTimestamp: string | null } = {
-        validated: false, slug: null, firstMessage: null, lastTimestamp: null,
-      }
-
-      await new Promise<void>((resolve) => {
-        const rl = createInterface({ input: createReadStream(filePath) })
-        rl.on('line', (line: string) => {
-          try {
-            const obj = JSON.parse(line)
-            // Validate: must have expected Claude transcript fields
-            if (!meta.validated && obj.type && obj.uuid && obj.timestamp) {
-              meta.validated = true
-            }
-            if (obj.slug && !meta.slug) meta.slug = obj.slug
-            if (obj.timestamp) meta.lastTimestamp = obj.timestamp
-            if (obj.type === 'user' && !meta.firstMessage) {
-              const content = obj.message?.content
-              if (typeof content === 'string') {
-                meta.firstMessage = content.substring(0, 100)
-              } else if (Array.isArray(content)) {
-                const textPart = content.find((p: any) => p.type === 'text')
-                meta.firstMessage = textPart?.text?.substring(0, 100) || null
-              }
-            }
-          } catch {}
-          // Read all lines to get the last timestamp
-        })
-        rl.on('close', () => resolve())
+    let projectDirs: string[]
+    if (projectPath) {
+      const encoded = projectPath.replace(/\//g, '-')
+      projectDirs = existsSync(join(projectsRoot, encoded)) ? [encoded] : []
+    } else {
+      projectDirs = readdirSync(projectsRoot).filter((d: string) => {
+        try { return statSync(join(projectsRoot, d)).isDirectory() } catch { return false }
       })
+    }
 
-      if (meta.validated) {
-        sessions.push({
-          sessionId: fileSessionId,
-          slug: meta.slug,
-          firstMessage: meta.firstMessage,
-          lastTimestamp: meta.lastTimestamp || stat.mtime.toISOString(),
-          size: stat.size,
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number; projectDir: string }> = []
+
+    for (const projectDir of projectDirs) {
+      const sessionsDir = join(projectsRoot, projectDir)
+      let files: string[]
+      try { files = readdirSync(sessionsDir).filter((f: string) => f.endsWith('.jsonl')) }
+      catch { continue }
+
+      for (const file of files) {
+        const fileSessionId = file.replace(/\.jsonl$/, '')
+        if (!UUID_RE.test(fileSessionId)) continue
+
+        const filePath = join(sessionsDir, file)
+        const stat = statSync(filePath)
+        if (stat.size < 100) continue
+
+        const meta: { validated: boolean; slug: string | null; firstMessage: string | null; lastTimestamp: string | null } = {
+          validated: false, slug: null, firstMessage: null, lastTimestamp: null,
+        }
+
+        await new Promise<void>((resolve) => {
+          const rl = createInterface({ input: createReadStream(filePath) })
+          rl.on('line', (line: string) => {
+            try {
+              const obj = JSON.parse(line)
+              if (!meta.validated && obj.type && obj.uuid && obj.timestamp) meta.validated = true
+              if (obj.slug && !meta.slug) meta.slug = obj.slug
+              if (obj.timestamp) meta.lastTimestamp = obj.timestamp
+              if (obj.type === 'user' && !meta.firstMessage) {
+                const content = obj.message?.content
+                if (typeof content === 'string') {
+                  meta.firstMessage = content.substring(0, 100)
+                } else if (Array.isArray(content)) {
+                  const textPart = content.find((p: any) => p.type === 'text')
+                  meta.firstMessage = textPart?.text?.substring(0, 100) || null
+                }
+              }
+            } catch {}
+          })
+          rl.on('close', () => resolve())
         })
+
+        if (meta.validated) {
+          sessions.push({
+            sessionId: fileSessionId,
+            slug: meta.slug,
+            firstMessage: meta.firstMessage,
+            lastTimestamp: meta.lastTimestamp || stat.mtime.toISOString(),
+            size: stat.size,
+            projectDir,
+          })
+        }
       }
     }
 
-    // Sort by last timestamp, most recent first
     sessions.sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime())
-    return sessions.slice(0, 20) // Return top 20
+    return sessions.slice(0, projectPath ? 20 : 100)
   } catch (err) {
     log(`LIST_SESSIONS error: ${err}`)
     return []
@@ -426,14 +427,20 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
 })
 
 // Load conversation history from a session's JSONL file
-ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPath?: string } | string) => {
+ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPath?: string; projectDir?: string } | string) => {
   const sessionId = typeof arg === 'string' ? arg : arg.sessionId
   const projectPath = typeof arg === 'string' ? undefined : arg.projectPath
-  log(`IPC LOAD_SESSION ${sessionId}${projectPath ? ` (path=${projectPath})` : ''}`)
+  const projectDir = typeof arg === 'string' ? undefined : arg.projectDir
+  log(`IPC LOAD_SESSION ${sessionId}`)
   try {
-    const cwd = projectPath || process.cwd()
-    const encodedPath = cwd.replace(/\//g, '-')
-    const filePath = join(homedir(), '.claude', 'projects', encodedPath, `${sessionId}.jsonl`)
+    let filePath: string
+    if (projectDir) {
+      filePath = join(homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`)
+    } else {
+      const cwd = projectPath || process.cwd()
+      const encodedPath = cwd.replace(/\//g, '-')
+      filePath = join(homedir(), '.claude', 'projects', encodedPath, `${sessionId}.jsonl`)
+    }
     if (!existsSync(filePath)) return []
 
     const messages: Array<{ role: string; content: string; toolName?: string; timestamp: number }> = []

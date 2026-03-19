@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
-import { useThemeStore } from '../theme'
+import { useThemeStore, type EffortLevel } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
 
 // ─── Known models ───
@@ -10,6 +10,28 @@ export const AVAILABLE_MODELS = [
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ] as const
+
+const SESSION_SETTINGS_KEY = 'clui-session-settings'
+
+function loadSessionSettings(): { preferredModel: string | null; permissionMode: 'ask' | 'auto' } {
+  try {
+    const raw = localStorage.getItem(SESSION_SETTINGS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      return {
+        preferredModel: typeof parsed.preferredModel === 'string' ? parsed.preferredModel : null,
+        permissionMode: parsed.permissionMode === 'auto' ? 'auto' : 'ask',
+      }
+    }
+  } catch {}
+  return { preferredModel: null, permissionMode: 'ask' }
+}
+
+function saveSessionSettings(s: { preferredModel: string | null; permissionMode: 'ask' | 'auto' }): void {
+  try { localStorage.setItem(SESSION_SETTINGS_KEY, JSON.stringify(s)) } catch {}
+}
+
+const savedSession = loadSessionSettings()
 
 // ─── Store ───
 
@@ -60,7 +82,7 @@ interface State {
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
-  resumeSession: (sessionId: string, title?: string, projectPath?: string) => Promise<string>
+  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string) => Promise<string>
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
@@ -126,8 +148,8 @@ export const useSessionStore = create<State>((set, get) => ({
   activeTabId: initialTab.id,
   isExpanded: false,
   staticInfo: null,
-  preferredModel: null,
-  permissionMode: 'ask',
+  preferredModel: savedSession.preferredModel,
+  permissionMode: savedSession.permissionMode,
 
   // Marketplace
   marketplaceOpen: false,
@@ -156,11 +178,13 @@ export const useSessionStore = create<State>((set, get) => ({
 
   setPreferredModel: (model) => {
     set({ preferredModel: model })
+    saveSessionSettings({ preferredModel: model, permissionMode: get().permissionMode })
   },
 
   setPermissionMode: (mode) => {
     set({ permissionMode: mode })
     window.clui.setPermissionMode(mode)
+    saveSessionSettings({ preferredModel: get().preferredModel, permissionMode: mode })
   },
 
   createTab: async () => {
@@ -350,13 +374,12 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 
-  resumeSession: async (sessionId, title, projectPath) => {
+  resumeSession: async (sessionId, title, projectPath, projectDir) => {
     const defaultDir = projectPath || get().staticInfo?.homePath || '~'
     try {
       const { tabId } = await window.clui.createTab()
 
-      // Load previous conversation messages from the JSONL file
-      const history = await window.clui.loadSession(sessionId, defaultDir).catch(() => [])
+      const history = await window.clui.loadSession(sessionId, projectPath, projectDir).catch(() => [])
       const messages: Message[] = history.map((m) => ({
         id: nextMsgId(),
         role: m.role as Message['role'],
@@ -583,12 +606,15 @@ export const useSessionStore = create<State>((set, get) => ({
 
     // Send to backend — ControlPlane will queue if a run is active
     const { preferredModel } = get()
+    const { effort, thinkingEnabled } = useThemeStore.getState()
     window.clui.prompt(activeTabId, requestId, {
       prompt: fullPrompt,
       projectPath: resolvedPath,
       sessionId: tab.claudeSessionId || undefined,
       model: preferredModel || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
+      effort: effort !== 'medium' ? (effort as EffortLevel) : undefined,
+      thinking: thinkingEnabled ? 'adaptive' : 'disabled',
     }).catch((err: Error) => {
       get().handleError(activeTabId, {
         message: err.message,
@@ -632,6 +658,22 @@ export const useSessionStore = create<State>((set, get) => ({
               }
             }
             break
+
+          case 'thinking_chunk': {
+            const lastThink = updated.messages[updated.messages.length - 1]
+            if (lastThink?.role === 'thinking') {
+              updated.messages = [
+                ...updated.messages.slice(0, -1),
+                { ...lastThink, content: lastThink.content + event.thinking },
+              ]
+            } else {
+              updated.messages = [
+                ...updated.messages,
+                { id: nextMsgId(), role: 'thinking', content: event.thinking, timestamp: Date.now() },
+              ]
+            }
+            break
+          }
 
           case 'text_chunk': {
             updated.currentActivity = 'Writing...'

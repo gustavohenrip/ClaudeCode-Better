@@ -34,16 +34,18 @@ export type StreamSubEvent =
   | { type: 'message_stop' }
 
 export interface ContentBlock {
-  type: 'text' | 'tool_use'
+  type: 'text' | 'tool_use' | 'thinking'
   text?: string
   id?: string
   name?: string
   input?: Record<string, unknown>
+  thinking?: string
 }
 
 export type ContentDelta =
   | { type: 'text_delta'; text: string }
   | { type: 'input_json_delta'; partial_json: string }
+  | { type: 'thinking_delta'; thinking: string }
 
 export interface AssistantEvent {
   type: 'assistant'
@@ -174,7 +176,7 @@ export interface TabState {
 
 export interface Message {
   id: string
-  role: 'user' | 'assistant' | 'tool' | 'system'
+  role: 'user' | 'assistant' | 'tool' | 'system' | 'thinking'
   content: string
   toolName?: string
   toolInput?: string
@@ -195,6 +197,7 @@ export interface RunResult {
 export type NormalizedEvent =
   | { type: 'session_init'; sessionId: string; tools: string[]; model: string; mcpServers: Array<{ name: string; status: string }>; skills: string[]; version: string; isWarmup?: boolean }
   | { type: 'text_chunk'; text: string }
+  | { type: 'thinking_chunk'; thinking: string }
   | { type: 'tool_call'; toolName: string; toolId: string; index: number }
   | { type: 'tool_call_update'; toolId: string; partialInput: string }
   | { type: 'tool_call_complete'; index: number }
@@ -221,6 +224,10 @@ export interface RunOptions {
   hookSettingsPath?: string
   /** Extra directories to add via --add-dir (session-preserving) */
   addDirs?: string[]
+  /** Reasoning effort level passed via --effort */
+  effort?: 'low' | 'medium' | 'high'
+  /** Thinking mode passed via --thinking */
+  thinking?: 'adaptive' | 'disabled'
 }
 
 // ─── Control Plane Types ───
@@ -266,6 +273,7 @@ export interface SessionMeta {
   firstMessage: string | null
   lastTimestamp: string
   size: number
+  projectDir: string
 }
 
 export interface SessionLoadMessage {

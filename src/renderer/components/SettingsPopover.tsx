@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { DotsThree, Bell, ArrowsOutSimple, Moon } from '@phosphor-icons/react'
-import { useThemeStore } from '../theme'
+import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning } from '@phosphor-icons/react'
+import { useThemeStore, type EffortLevel } from '../theme'
 import { useSessionStore } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
@@ -41,6 +41,43 @@ function RowToggle({
   )
 }
 
+function SegmentedControl({
+  value,
+  onChange,
+  options,
+  colors,
+}: {
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+  colors: ReturnType<typeof useColors>
+}) {
+  return (
+    <div
+      className="flex rounded-lg overflow-hidden"
+      style={{ background: colors.surfaceSecondary, gap: 2, padding: 2 }}
+    >
+      {options.map((opt) => {
+        const active = opt.value === value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className="flex-1 text-[11px] font-medium py-0.5 rounded-md transition-colors"
+            style={{
+              background: active ? colors.accent : 'transparent',
+              color: active ? colors.textOnAccent : colors.textTertiary,
+            }}
+          >
+            {opt.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 /* ─── Settings popover ─── */
 
 export function SettingsPopover() {
@@ -50,6 +87,10 @@ export function SettingsPopover() {
   const setThemeMode = useThemeStore((s) => s.setThemeMode)
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const setExpandedUI = useThemeStore((s) => s.setExpandedUI)
+  const effort = useThemeStore((s) => s.effort)
+  const setEffort = useThemeStore((s) => s.setEffort)
+  const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
+  const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
@@ -218,6 +259,48 @@ export function SettingsPopover() {
                   onChange={(next) => setThemeMode(next ? 'dark' : 'light')}
                   colors={colors}
                   label="Toggle dark theme"
+                />
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: colors.popoverBorder }} />
+
+            {/* Effort */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <Lightning size={14} style={{ color: colors.textTertiary }} />
+                <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                  Effort
+                </div>
+              </div>
+              <SegmentedControl
+                value={effort}
+                onChange={(v) => setEffort(v as EffortLevel)}
+                options={[
+                  { value: 'low', label: 'Low' },
+                  { value: 'medium', label: 'Medium' },
+                  { value: 'high', label: 'High' },
+                ]}
+                colors={colors}
+              />
+            </div>
+
+            <div style={{ height: 1, background: colors.popoverBorder }} />
+
+            {/* Thinking */}
+            <div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Brain size={14} style={{ color: colors.textTertiary }} />
+                  <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                    Thinking
+                  </div>
+                </div>
+                <RowToggle
+                  checked={thinkingEnabled}
+                  onChange={setThinkingEnabled}
+                  colors={colors}
+                  label="Toggle extended thinking"
                 />
               </div>
             </div>

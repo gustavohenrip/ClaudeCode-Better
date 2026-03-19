@@ -4,7 +4,7 @@ import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react
 import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
-import { useColors } from '../theme'
+import { useColors, useThemeStore, type EffortLevel } from '../theme'
 
 const INPUT_MIN_HEIGHT = 20
 const INPUT_MAX_HEIGHT = 140
@@ -42,6 +42,10 @@ export function InputBar() {
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
+  const effort = useThemeStore((s) => s.effort)
+  const setEffort = useThemeStore((s) => s.setEffort)
+  const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
+  const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
   const colors = useColors()
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isConnecting = tab?.status === 'connecting'
@@ -214,11 +218,20 @@ export function InputBar() {
         }
         break
       }
+      case '/effort':
+        addSystemMessage(`Effort: ${effort}\n\nSet with: /effort low, /effort medium, /effort high`)
+        break
+      case '/thinking':
+        setThinkingEnabled(!thinkingEnabled)
+        addSystemMessage(`Thinking ${!thinkingEnabled ? 'enabled' : 'disabled'}`)
+        break
       case '/help': {
         const lines = [
           '/clear — Clear conversation history',
           '/cost — Show token usage and cost',
           '/model — Show model info & switch models',
+          '/effort — Set effort level (low / medium / high)',
+          '/thinking — Toggle extended thinking on/off',
           '/mcp — Show MCP server status',
           '/skills — Show available skills',
           '/help — Show this list',
@@ -227,7 +240,7 @@ export function InputBar() {
         break
       }
     }
-  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel])
+  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel, effort, thinkingEnabled, setThinkingEnabled])
 
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     const isSkillCommand = !!tab?.sessionSkills?.includes(cmd.command.replace(/^\//, ''))
@@ -270,6 +283,41 @@ export function InputBar() {
       }
       return
     }
+    const effortMatch = prompt.match(/^\/effort\s+(\S+)/i)
+    if (effortMatch) {
+      const val = effortMatch[1].toLowerCase() as EffortLevel
+      if (['low', 'medium', 'high'].includes(val)) {
+        setEffort(val)
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage(`Effort set to ${val}`)
+      } else {
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage(`Unknown effort "${effortMatch[1]}". Available: low, medium, high`)
+      }
+      return
+    }
+    const thinkingMatch = prompt.match(/^\/thinking\s+(\S+)/i)
+    if (thinkingMatch) {
+      const val = thinkingMatch[1].toLowerCase()
+      if (val === 'on' || val === 'enabled') {
+        setThinkingEnabled(true)
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage('Thinking enabled')
+      } else if (val === 'off' || val === 'disabled') {
+        setThinkingEnabled(false)
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage('Thinking disabled')
+      } else {
+        setInput('')
+        setSlashFilter(null)
+        addSystemMessage(`Unknown value "${thinkingMatch[1]}". Use: /thinking on or /thinking off`)
+      }
+      return
+    }
     if (!prompt && attachments.length === 0) return
     if (isConnecting) return
     setInput('')
@@ -280,7 +328,7 @@ export function InputBar() {
     sendMessage(prompt || 'See attached files')
     // Refocus after React re-renders from the state update
     requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect])
+  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, setEffort, setThinkingEnabled])
 
   // ─── Keyboard ───
   const handleKeyDown = (e: React.KeyboardEvent) => {
