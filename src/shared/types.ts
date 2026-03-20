@@ -210,6 +210,7 @@ export type NormalizedEvent =
   | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
   | { type: 'usage'; usage: UsageData }
   | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
+  | { type: 'compact_complete'; clearedTokens: number }
 
 // ─── Run Options ───
 
@@ -283,6 +284,7 @@ export interface SessionLoadMessage {
   role: string
   content: string
   toolName?: string
+  toolInput?: string
   timestamp: number
 }
 
@@ -333,6 +335,8 @@ export const IPC = {
   ANIMATE_HEIGHT: 'clui:animate-height',
   LIST_SESSIONS: 'clui:list-sessions',
   LOAD_SESSION: 'clui:load-session',
+  RESOLVE_PROJECT_DIR: 'clui:resolve-project-dir',
+  RESOLVE_SESSION_DIR: 'clui:resolve-session-dir',
 
   // One-way events (main → renderer)
   TEXT_CHUNK: 'clui:text-chunk',
@@ -351,6 +355,8 @@ export const IPC = {
   SET_WINDOW_WIDTH: 'clui:set-window-width',
   HIDE_WINDOW: 'clui:hide-window',
   WINDOW_SHOWN: 'clui:window-shown',
+  WINDOW_WILL_HIDE: 'clui:window-will-hide',
+  NOTIFY_NATIVE: 'clui:notify-native',
   SET_IGNORE_MOUSE_EVENTS: 'clui:set-ignore-mouse-events',
   IS_VISIBLE: 'clui:is-visible',
 
@@ -369,6 +375,10 @@ export const IPC = {
 
   // Permission mode
   SET_PERMISSION_MODE: 'clui:set-permission-mode',
+
+  // MCP management
+  MCP_ADD: 'clui:mcp-add',
+  MCP_REMOVE: 'clui:mcp-remove',
 
   // Legacy (kept for backward compat during migration)
   STREAM_EVENT: 'clui:stream-event',

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning } from '@phosphor-icons/react'
+import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning, Scroll, Plugs, Plus, X, Terminal, GlobeSimple, CaretLeft } from '@phosphor-icons/react'
 import { useThemeStore, type EffortLevel } from '../theme'
 import { useSessionStore, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -94,13 +94,32 @@ export function SettingsPopover() {
   const setEffort = useThemeStore((s) => s.setEffort)
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
   const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
+  const globalRules = useThemeStore((s) => s.globalRules)
+  const setGlobalRules = useThemeStore((s) => s.setGlobalRules)
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const supportsMaxEffort = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
+  const activeTab_ = useSessionStore((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    return tab
+  })
+  const mcpServers = activeTab_?.sessionMcpServers || []
+
   const [open, setOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState<'settings' | 'rules' | 'mcp'>('settings')
+  const [mcpView, setMcpView] = useState<'list' | 'add'>('list')
+  const [mcpType, setMcpType] = useState<'stdio' | 'http'>('stdio')
+  const [mcpName, setMcpName] = useState('')
+  const [mcpCommand, setMcpCommand] = useState('')
+  const [mcpArgs, setMcpArgs] = useState('')
+  const [mcpUrl, setMcpUrl] = useState('')
+  const [mcpEnv, setMcpEnv] = useState('')
+  const [mcpAdding, setMcpAdding] = useState(false)
+  const [mcpError, setMcpError] = useState('')
+  const [mcpRemoving, setMcpRemoving] = useState<string | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ right: number; top?: number; bottom?: number; maxHeight?: number }>({ right: 0 })
@@ -108,28 +127,15 @@ export function SettingsPopover() {
   const updatePos = useCallback(() => {
     if (!triggerRef.current) return
     const rect = triggerRef.current.getBoundingClientRect()
-    const gap = 6 // Match HistoryPicker spacing exactly.
-    const margin = 8
+    const gap = 6
     const right = window.innerWidth - rect.right
+    const estimatedHeight = 300
 
-    if (isExpanded) {
-      // Keep anchored below trigger (so it never covers the dots button),
-      // and shrink if needed instead of shifting upward onto the trigger.
-      const top = rect.bottom + gap
-      setPos({
-        top,
-        right,
-        maxHeight: Math.max(120, window.innerHeight - top - margin),
-      })
-      return
+    if (rect.top < estimatedHeight + gap) {
+      setPos({ top: rect.bottom + gap, right, maxHeight: undefined })
+    } else {
+      setPos({ bottom: window.innerHeight - rect.top + gap, right, maxHeight: undefined })
     }
-
-    // Same logic as HistoryPicker for collapsed mode: open upward from trigger.
-    setPos({
-      bottom: window.innerHeight - rect.top + gap,
-      right,
-      maxHeight: undefined,
-    })
   }, [isExpanded])
 
   useEffect(() => {
@@ -193,9 +199,9 @@ export function SettingsPopover() {
         <motion.div
           ref={popoverRef}
           data-clui-ui
-          initial={{ opacity: 0, y: isExpanded ? -6 : 6, scale: 0.96 }}
+          initial={{ opacity: 0, y: 6, scale: 0.96 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: isExpanded ? -4 : 4, scale: 0.97 }}
+          exit={{ opacity: 0, y: 4, scale: 0.97 }}
           transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
           className="rounded-xl"
           style={{
@@ -203,119 +209,349 @@ export function SettingsPopover() {
             ...(pos.top != null ? { top: pos.top } : {}),
             ...(pos.bottom != null ? { bottom: pos.bottom } : {}),
             right: pos.right,
-            width: 240,
+            width: 260,
+            maxHeight: 420,
             pointerEvents: 'auto',
             background: colors.popoverBg,
             backdropFilter: 'blur(20px)',
             WebkitBackdropFilter: 'blur(20px)',
             boxShadow: colors.popoverShadow,
             border: `1px solid ${colors.popoverBorder}`,
-            ...(pos.maxHeight != null ? { maxHeight: pos.maxHeight, overflowY: 'auto' as const } : {}),
+            display: 'flex',
+            flexDirection: 'column' as const,
           }}
         >
-          <div className="p-3 flex flex-col gap-2.5">
-            {/* Full width */}
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <ArrowsOutSimple size={14} style={{ color: colors.textTertiary }} />
-                  <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                    Full width
-                  </div>
-                </div>
-                <RowToggle
-                  checked={expandedUI}
-                  onChange={(next) => {
-                    setExpandedUI(next)
+          <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, maxHeight: '100%' }}>
+            <div
+              className="flex flex-shrink-0"
+              style={{ borderBottom: `1px solid ${colors.popoverBorder}` }}
+            >
+              {(['settings', 'rules', 'mcp'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => { setActiveTab(tab); if (tab === 'mcp') { setMcpView('list'); setMcpError('') } }}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 text-[10px] font-medium transition-colors"
+                  style={{
+                    color: activeTab === tab ? colors.textPrimary : colors.textTertiary,
+                    background: 'transparent',
+                    border: 'none',
+                    borderBottom: activeTab === tab ? `2px solid ${colors.accent}` : '2px solid transparent',
+                    cursor: 'pointer',
+                    paddingBottom: 6,
                   }}
-                  colors={colors}
-                  label="Toggle full width panel"
-                />
-              </div>
+                >
+                  {tab === 'settings' && <><Lightning size={10} />Settings</>}
+                  {tab === 'rules' && <><Scroll size={10} />Rules</>}
+                  {tab === 'mcp' && <><Plugs size={10} />MCP</>}
+                </button>
+              ))}
             </div>
 
-            <div style={{ height: 1, background: colors.popoverBorder }} />
-
-            {/* Notification sound */}
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Bell size={14} style={{ color: colors.textTertiary }} />
-                  <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                    Notification sound
+            {activeTab === 'settings' && (
+              <div className="p-3 flex flex-col gap-2.5">
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ArrowsOutSimple size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                        Full width
+                      </div>
+                    </div>
+                    <RowToggle checked={expandedUI} onChange={(next) => setExpandedUI(next)} colors={colors} label="Toggle full width panel" />
                   </div>
                 </div>
-                <RowToggle
-                  checked={soundEnabled}
-                  onChange={setSoundEnabled}
-                  colors={colors}
-                  label="Toggle notification sound"
-                />
-              </div>
-            </div>
 
-            <div style={{ height: 1, background: colors.popoverBorder }} />
+                <div style={{ height: 1, background: colors.popoverBorder }} />
 
-            {/* Theme */}
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Moon size={14} style={{ color: colors.textTertiary }} />
-                  <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                    Dark theme
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Bell size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                        Notification sound
+                      </div>
+                    </div>
+                    <RowToggle checked={soundEnabled} onChange={setSoundEnabled} colors={colors} label="Toggle notification sound" />
                   </div>
                 </div>
-                <RowToggle
-                  checked={themeMode === 'dark'}
-                  onChange={(next) => setThemeMode(next ? 'dark' : 'light')}
-                  colors={colors}
-                  label="Toggle dark theme"
-                />
-              </div>
-            </div>
 
-            <div style={{ height: 1, background: colors.popoverBorder }} />
+                <div style={{ height: 1, background: colors.popoverBorder }} />
 
-            {/* Effort */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-2">
-                <Lightning size={14} style={{ color: colors.textTertiary }} />
-                <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                  Effort
-                </div>
-              </div>
-              <SegmentedControl
-                value={effort === 'max' && !supportsMaxEffort ? 'high' : effort}
-                onChange={(v) => setEffort(v as EffortLevel)}
-                options={[
-                  { value: 'low', label: 'Low' },
-                  { value: 'medium', label: 'Medium' },
-                  { value: 'high', label: 'High' },
-                  ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
-                ]}
-                colors={colors}
-              />
-            </div>
-
-            <div style={{ height: 1, background: colors.popoverBorder }} />
-
-            {/* Thinking */}
-            <div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Brain size={14} style={{ color: colors.textTertiary }} />
-                  <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                    Thinking
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Moon size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                        Dark theme
+                      </div>
+                    </div>
+                    <RowToggle checked={themeMode === 'dark'} onChange={(next) => setThemeMode(next ? 'dark' : 'light')} colors={colors} label="Toggle dark theme" />
                   </div>
                 </div>
-                <RowToggle
-                  checked={thinkingEnabled}
-                  onChange={setThinkingEnabled}
-                  colors={colors}
-                  label="Toggle extended thinking"
+
+                <div style={{ height: 1, background: colors.popoverBorder }} />
+
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Lightning size={14} style={{ color: colors.textTertiary }} />
+                    <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Effort</div>
+                  </div>
+                  <SegmentedControl
+                    value={effort === 'max' && !supportsMaxEffort ? 'high' : effort}
+                    onChange={(v) => setEffort(v as EffortLevel)}
+                    options={[
+                      { value: 'low', label: 'Low' },
+                      { value: 'medium', label: 'Medium' },
+                      { value: 'high', label: 'High' },
+                      ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
+                    ]}
+                    colors={colors}
+                  />
+                </div>
+
+                <div style={{ height: 1, background: colors.popoverBorder }} />
+
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Brain size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Thinking</div>
+                    </div>
+                    <RowToggle checked={thinkingEnabled} onChange={setThinkingEnabled} colors={colors} label="Toggle extended thinking" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'rules' && (
+              <div className="p-3 flex flex-col gap-2">
+                <div className="text-[10px] leading-[1.5]" style={{ color: colors.textTertiary }}>
+                  Applied as system prompt to every session across all directories.
+                </div>
+                <textarea
+                  value={globalRules}
+                  onChange={(e) => setGlobalRules(e.target.value)}
+                  placeholder="Always respond in Portuguese. Be concise..."
+                  spellCheck={false}
+                  className="w-full rounded-lg resize-none"
+                  style={{
+                    height: 150,
+                    background: colors.surfaceSecondary,
+                    border: `1px solid ${colors.containerBorder}`,
+                    color: colors.textPrimary,
+                    padding: '7px 9px',
+                    outline: 'none',
+                    fontFamily: 'inherit',
+                    fontSize: 11,
+                    lineHeight: 1.6,
+                  }}
+                  onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                  onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
                 />
               </div>
-            </div>
+            )}
+
+            {activeTab === 'mcp' && mcpView === 'list' && (
+              <div style={{ overflow: 'auto', flex: 1, minHeight: 0 }}>
+                <div className="p-2.5 flex flex-col gap-1.5">
+                  {mcpServers.length === 0 && (
+                    <div className="text-[10px] text-center py-4" style={{ color: colors.textTertiary }}>
+                      No MCP servers in this session.
+                    </div>
+                  )}
+                  {mcpServers.map((s) => {
+                    const isOk = s.status === 'connected'
+                    const isBad = s.status.toLowerCase().includes('fail')
+                    return (
+                      <div
+                        key={s.name}
+                        className="flex items-center gap-2 px-2.5 py-[7px] rounded-lg group"
+                        style={{ border: `1px solid ${colors.containerBorder}` }}
+                      >
+                        <span
+                          className="flex-shrink-0 w-[6px] h-[6px] rounded-full"
+                          style={{ background: isOk ? '#4ade80' : isBad ? '#ef4444' : colors.textTertiary }}
+                        />
+                        <span className="flex-1 text-[11px] truncate" style={{ color: colors.textPrimary }}>{s.name}</span>
+                        <span className="text-[9px] flex-shrink-0" style={{ color: isOk ? colors.textTertiary : isBad ? '#ef4444' : colors.textTertiary }}>
+                          {isOk ? 'on' : isBad ? 'err' : s.status}
+                        </span>
+                        <button
+                          type="button"
+                          className="flex-shrink-0 w-4 h-4 flex items-center justify-center rounded opacity-0 group-hover:opacity-60 transition-opacity"
+                          style={{ color: colors.textTertiary, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                          disabled={mcpRemoving === s.name}
+                          onClick={async () => {
+                            setMcpRemoving(s.name)
+                            setMcpError('')
+                            try {
+                              const result = await window.clui.mcpRemove(s.name, 'user')
+                              if (!result.ok) setMcpError(result.error || 'Failed')
+                            } finally { setMcpRemoving(null) }
+                          }}
+                        >
+                          <X size={9} />
+                        </button>
+                      </div>
+                    )
+                  })}
+                  {mcpError && (
+                    <div className="text-[9px] px-1" style={{ color: '#ef4444' }}>{mcpError}</div>
+                  )}
+                </div>
+                <div className="px-2.5 pb-2.5 flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => { setMcpView('add'); setMcpError(''); setMcpName(''); setMcpCommand(''); setMcpArgs(''); setMcpUrl(''); setMcpEnv(''); setMcpType('stdio') }}
+                    className="flex items-center justify-center gap-1.5 py-[5px] rounded-lg text-[10px] font-medium transition-colors"
+                    style={{ border: `1px dashed ${colors.containerBorder}`, background: 'transparent', color: colors.textTertiary, cursor: 'pointer' }}
+                  >
+                    <Plus size={10} />
+                    Add server
+                  </button>
+                  <div className="text-[9px] text-center" style={{ color: colors.textTertiary, opacity: 0.7 }}>
+                    Restart session to apply changes.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'mcp' && mcpView === 'add' && (
+              <div style={{ overflow: 'auto', flex: 1, minHeight: 0 }}>
+                <div className="p-2.5 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setMcpView('list'); setMcpError('') }}
+                    className="flex items-center gap-0.5 text-[10px] self-start"
+                    style={{ color: colors.textTertiary, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                  >
+                    <CaretLeft size={10} />
+                    Back
+                  </button>
+
+                  <input
+                    value={mcpName}
+                    onChange={(e) => setMcpName(e.target.value)}
+                    placeholder="Name"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '5px 8px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                    onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                  />
+
+                  <div className="flex rounded-lg overflow-hidden" style={{ background: colors.surfaceSecondary, gap: 2, padding: 2 }}>
+                    {(['stdio', 'http'] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setMcpType(t)}
+                        className="flex-1 flex items-center justify-center gap-1 text-[10px] font-medium py-0.5 rounded-md transition-colors"
+                        style={{ background: mcpType === t ? colors.accent : 'transparent', color: mcpType === t ? colors.textOnAccent : colors.textTertiary, border: 'none', cursor: 'pointer' }}
+                      >
+                        {t === 'stdio' ? <><Terminal size={9} />stdio</> : <><GlobeSimple size={9} />http</>}
+                      </button>
+                    ))}
+                  </div>
+
+                  {mcpType === 'stdio' && (
+                    <>
+                      <input
+                        value={mcpCommand}
+                        onChange={(e) => setMcpCommand(e.target.value)}
+                        placeholder="Command (e.g. npx)"
+                        spellCheck={false}
+                        className="w-full rounded-md"
+                        style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '5px 8px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                        onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                        onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                      />
+                      <input
+                        value={mcpArgs}
+                        onChange={(e) => setMcpArgs(e.target.value)}
+                        placeholder="Args (space-separated)"
+                        spellCheck={false}
+                        className="w-full rounded-md"
+                        style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '5px 8px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                        onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                        onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                      />
+                    </>
+                  )}
+
+                  {mcpType === 'http' && (
+                    <input
+                      value={mcpUrl}
+                      onChange={(e) => setMcpUrl(e.target.value)}
+                      placeholder="URL"
+                      spellCheck={false}
+                      className="w-full rounded-md"
+                      style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '5px 8px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                    />
+                  )}
+
+                  <input
+                    value={mcpEnv}
+                    onChange={(e) => setMcpEnv(e.target.value)}
+                    placeholder="Env vars (KEY=val KEY2=val2)"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '5px 8px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                    onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                  />
+
+                  {mcpError && (
+                    <div className="text-[9px]" style={{ color: '#ef4444' }}>{mcpError}</div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={mcpAdding || !mcpName.trim() || (mcpType === 'stdio' ? !mcpCommand.trim() : !mcpUrl.trim())}
+                    onClick={async () => {
+                      setMcpAdding(true)
+                      setMcpError('')
+                      try {
+                        const envObj: Record<string, string> = {}
+                        if (mcpEnv.trim()) {
+                          mcpEnv.trim().split(/\s+/).forEach((pair) => {
+                            const eq = pair.indexOf('=')
+                            if (eq > 0) envObj[pair.substring(0, eq)] = pair.substring(eq + 1)
+                          })
+                        }
+                        let json: string
+                        if (mcpType === 'stdio') {
+                          const args = mcpArgs.trim() ? mcpArgs.trim().split(/\s+/) : []
+                          json = JSON.stringify({ type: 'stdio', command: mcpCommand.trim(), args, ...(Object.keys(envObj).length > 0 ? { env: envObj } : {}) })
+                        } else {
+                          json = JSON.stringify({ type: 'http', url: mcpUrl.trim(), ...(Object.keys(envObj).length > 0 ? { headers: envObj } : {}) })
+                        }
+                        const result = await window.clui.mcpAdd(mcpName.trim(), json, 'user')
+                        if (result.ok) {
+                          setMcpView('list')
+                          setMcpName(''); setMcpCommand(''); setMcpArgs(''); setMcpUrl(''); setMcpEnv('')
+                        } else {
+                          setMcpError(result.error || 'Failed to add')
+                        }
+                      } finally { setMcpAdding(false) }
+                    }}
+                    className="flex items-center justify-center gap-1 py-[5px] rounded-lg text-[10px] font-medium transition-colors"
+                    style={{
+                      background: (!mcpName.trim() || (mcpType === 'stdio' ? !mcpCommand.trim() : !mcpUrl.trim())) ? colors.surfaceSecondary : colors.accent,
+                      color: (!mcpName.trim() || (mcpType === 'stdio' ? !mcpCommand.trim() : !mcpUrl.trim())) ? colors.textTertiary : colors.textOnAccent,
+                      border: 'none',
+                      cursor: mcpAdding ? 'wait' : 'pointer',
+                      opacity: mcpAdding ? 0.6 : 1,
+                    }}
+                  >
+                    {mcpAdding ? 'Adding...' : 'Add'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </motion.div>,
         popoverLayer,

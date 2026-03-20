@@ -25,6 +25,8 @@ Desktop.ini
 # Environment (not needed for core flow, but excluded defensively)
 .env
 .env.*
+.codex_conversations
+CLAUDE.md
 
 # Logs
 *.log

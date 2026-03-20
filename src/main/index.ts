@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard } from 'electron'
-import { join, resolve } from 'path'
-import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard, Notification } from 'electron'
+import { join, resolve, dirname } from 'path'
+import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { createInterface } from 'readline'
 import { homedir } from 'os'
 import { ControlPlane } from './claude/control-plane'
@@ -22,6 +24,7 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let screenshotCounter = 0
 let toggleSequence = 0
+let pendingHideTimeout: ReturnType<typeof setTimeout> | null = null
 
 // Feature flag: enable PTY interactive permissions transport
 const INTERACTIVE_PTY = process.env.CLUI_INTERACTIVE_PERMISSIONS_PTY === '1'
@@ -33,6 +36,54 @@ const controlPlane = new ControlPlane(INTERACTIVE_PTY)
 const BAR_WIDTH = 1040
 const PILL_HEIGHT = 720  // Fixed native window height — extra room for expanded UI + shadow buffers
 const PILL_BOTTOM_MARGIN = 24
+
+const execFileAsync = promisify(execFile)
+const START_CACHE_FILE = join(homedir(), '.claude', 'clui-start-cache.json')
+const START_TTL_MS = 5 * 60 * 1000
+const START_SOFT_WAIT_MS = 120
+
+type StartCache = { version: string; auth: Record<string, unknown>; mcpServers: string[]; updatedAt: number }
+let startCache: StartCache | null = null
+let startRefreshInFlight: Promise<void> | null = null
+
+function loadStartCache(): StartCache | null {
+  try {
+    if (!existsSync(START_CACHE_FILE)) return null
+    const parsed = JSON.parse(readFileSync(START_CACHE_FILE, 'utf-8')) as StartCache
+    return (parsed && typeof parsed.updatedAt === 'number') ? parsed : null
+  } catch { return null }
+}
+
+function saveStartCache(c: StartCache): void {
+  try { mkdirSync(dirname(START_CACHE_FILE), { recursive: true }); writeFileSync(START_CACHE_FILE, JSON.stringify(c), 'utf-8') } catch {}
+}
+
+async function runClaudeCmd(args: string[], timeout: number): Promise<string> {
+  const { stdout } = await execFileAsync('claude', args, { encoding: 'utf-8', timeout, env: getCliEnv(), windowsHide: true, maxBuffer: 1024 * 1024 })
+  return (stdout || '').trim()
+}
+
+async function refreshStartCache(): Promise<void> {
+  const [versionR, authR] = await Promise.allSettled([
+    runClaudeCmd(['-v'], 1200),
+    runClaudeCmd(['auth', 'status'], 1500),
+  ])
+  const next: StartCache = {
+    version: versionR.status === 'fulfilled' ? versionR.value : (startCache?.version ?? 'unknown'),
+    auth: authR.status === 'fulfilled' ? (() => { try { return JSON.parse(authR.value) } catch { return {} } })() : (startCache?.auth ?? {}),
+    mcpServers: startCache?.mcpServers ?? [],
+    updatedAt: Date.now(),
+  }
+  startCache = next
+  saveStartCache(next)
+  runClaudeCmd(['mcp', 'list'], 6000).then((raw) => {
+    const servers = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+    startCache = { ...next, mcpServers: servers, updatedAt: Date.now() }
+    saveStartCache(startCache)
+  }).catch(() => {})
+}
+
+startCache = loadStartCache()
 
 // ─── Broadcast to renderer ───
 
@@ -171,6 +222,10 @@ function createWindow(): void {
 
 function showWindow(source = 'unknown'): void {
   if (!mainWindow) return
+  if (pendingHideTimeout) {
+    clearTimeout(pendingHideTimeout)
+    pendingHideTimeout = null
+  }
   const toggleId = ++toggleSequence
 
   // Position on the display where the cursor currently is (not always primary)
@@ -213,8 +268,13 @@ function toggleWindow(source = 'unknown'): void {
   }
 
   if (mainWindow.isVisible()) {
-    mainWindow.hide()
-    if (SPACES_DEBUG) scheduleToggleSnapshots(toggleId, 'hide')
+    if (pendingHideTimeout) { clearTimeout(pendingHideTimeout); pendingHideTimeout = null }
+    broadcast(IPC.WINDOW_WILL_HIDE)
+    pendingHideTimeout = setTimeout(() => {
+      mainWindow?.hide()
+      pendingHideTimeout = null
+      if (SPACES_DEBUG) scheduleToggleSnapshots(toggleId, 'hide')
+    }, 185)
   } else {
     showWindow(source)
   }
@@ -237,11 +297,24 @@ ipcMain.handle(IPC.ANIMATE_HEIGHT, () => {
 })
 
 ipcMain.on(IPC.HIDE_WINDOW, () => {
-  mainWindow?.hide()
+  if (!mainWindow) return
+  if (pendingHideTimeout) { clearTimeout(pendingHideTimeout); pendingHideTimeout = null }
+  broadcast(IPC.WINDOW_WILL_HIDE)
+  pendingHideTimeout = setTimeout(() => {
+    mainWindow?.hide()
+    pendingHideTimeout = null
+  }, 185)
 })
 
 ipcMain.handle(IPC.IS_VISIBLE, () => {
   return mainWindow?.isVisible() ?? false
+})
+
+ipcMain.on(IPC.NOTIFY_NATIVE, (_e, payload: { title: string; body: string }) => {
+  if (!Notification.isSupported()) return
+  const n = new Notification({ title: payload.title, body: payload.body, silent: true })
+  n.on('click', () => showWindow('notification-click'))
+  n.show()
 })
 
 // OS-level click-through toggle — renderer calls this on mousemove
@@ -256,27 +329,21 @@ ipcMain.on(IPC.SET_IGNORE_MOUSE_EVENTS, (event, ignore: boolean, options?: { for
 // ─── IPC Handlers (typed, strict) ───
 
 ipcMain.handle(IPC.START, async () => {
-  log('IPC START — fetching static CLI info')
-  const { execSync } = require('child_process')
-
-  let version = 'unknown'
-  try {
-    version = execSync('claude -v', { encoding: 'utf-8', timeout: 5000, env: getCliEnv() }).trim()
-  } catch {}
-
-  let auth: { email?: string; subscriptionType?: string; authMethod?: string } = {}
-  try {
-    const raw = execSync('claude auth status', { encoding: 'utf-8', timeout: 5000, env: getCliEnv() }).trim()
-    auth = JSON.parse(raw)
-  } catch {}
-
-  let mcpServers: string[] = []
-  try {
-    const raw = execSync('claude mcp list', { encoding: 'utf-8', timeout: 5000, env: getCliEnv() }).trim()
-    if (raw) mcpServers = raw.split('\n').filter(Boolean)
-  } catch {}
-
-  return { version, auth, mcpServers, projectPath: process.cwd(), homePath: require('os').homedir() }
+  log('IPC START')
+  const stale = !startCache || (Date.now() - startCache.updatedAt > START_TTL_MS)
+  if (stale && !startRefreshInFlight) {
+    startRefreshInFlight = refreshStartCache().finally(() => { startRefreshInFlight = null })
+  }
+  if (startRefreshInFlight) {
+    await Promise.race([startRefreshInFlight, new Promise<void>((r) => setTimeout(r, START_SOFT_WAIT_MS))])
+  }
+  return {
+    version: startCache?.version ?? 'unknown',
+    auth: startCache?.auth ?? {},
+    mcpServers: startCache?.mcpServers ?? [],
+    projectPath: process.cwd(),
+    homePath: homedir(),
+  }
 })
 
 ipcMain.handle(IPC.CREATE_TAB, () => {
@@ -285,9 +352,9 @@ ipcMain.handle(IPC.CREATE_TAB, () => {
   return { tabId }
 })
 
-ipcMain.on(IPC.INIT_SESSION, (_event, tabId: string) => {
+ipcMain.on(IPC.INIT_SESSION, (_event, tabId: string, systemPrompt?: string) => {
   log(`IPC INIT_SESSION: ${tabId}`)
-  controlPlane.initSession(tabId)
+  controlPlane.initSession(tabId, systemPrompt)
 })
 
 ipcMain.on(IPC.RESET_TAB_SESSION, (_event, tabId: string) => {
@@ -475,7 +542,7 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
     }
     if (!existsSync(filePath)) return []
 
-    const messages: Array<{ role: string; content: string; toolName?: string; timestamp: number }> = []
+    const messages: Array<{ role: string; content: string; toolName?: string; toolInput?: string; timestamp: number }> = []
     await new Promise<void>((resolve) => {
       const rl = createInterface({ input: createReadStream(filePath) })
       rl.on('line', (line: string) => {
@@ -506,6 +573,7 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
                     role: 'tool',
                     content: '',
                     toolName: block.name,
+                    toolInput: block.input ? JSON.stringify(block.input) : undefined,
                     timestamp: new Date(obj.timestamp).getTime(),
                   })
                 }
@@ -521,6 +589,47 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
     log(`LOAD_SESSION error: ${err}`)
     return []
   }
+})
+
+function decodeEncodedDir(encoded: string): string {
+  if (!encoded.startsWith('-')) return homedir()
+  const parts = encoded.slice(1).split('-')
+  function dfs(idx: number, current: string): string | null {
+    if (idx >= parts.length) return existsSync(current) ? current : null
+    for (let take = 1; idx + take <= parts.length; take++) {
+      const component = parts.slice(idx, idx + take).join('-')
+      const next = current + '/' + component
+      if (idx + take === parts.length) {
+        if (existsSync(next)) return next
+      } else {
+        try {
+          if (existsSync(next) && statSync(next).isDirectory()) {
+            const result = dfs(idx + take, next)
+            if (result) return result
+          }
+        } catch {}
+      }
+    }
+    return null
+  }
+  return dfs(0, '') || homedir()
+}
+
+ipcMain.handle(IPC.RESOLVE_PROJECT_DIR, (_e, projectDir: string): string => {
+  return decodeEncodedDir(projectDir)
+})
+
+ipcMain.handle(IPC.RESOLVE_SESSION_DIR, (_e, sessionId: string): string => {
+  const projectsBase = join(homedir(), '.claude', 'projects')
+  try {
+    const dirs = readdirSync(projectsBase)
+    for (const dir of dirs) {
+      if (existsSync(join(projectsBase, dir, `${sessionId}.jsonl`))) {
+        return decodeEncodedDir(dir)
+      }
+    }
+  } catch {}
+  return homedir()
 })
 
 ipcMain.handle(IPC.SELECT_DIRECTORY, async () => {
@@ -1007,6 +1116,30 @@ ipcMain.handle(IPC.MARKETPLACE_INSTALL, async (_event, { repo, pluginName, marke
 ipcMain.handle(IPC.MARKETPLACE_UNINSTALL, async (_event, { pluginName }: { pluginName: string }) => {
   log(`IPC MARKETPLACE_UNINSTALL: ${pluginName}`)
   return uninstallPlugin(pluginName)
+})
+
+ipcMain.handle(IPC.MCP_ADD, async (_event, { name, json, scope }: { name: string; json: string; scope: string }) => {
+  log(`IPC MCP_ADD: ${name} scope=${scope}`)
+  try {
+    await runClaudeCmd(['mcp', 'add-json', '-s', scope, name, json], 10000)
+    return { ok: true }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log(`MCP_ADD error: ${msg}`)
+    return { ok: false, error: msg }
+  }
+})
+
+ipcMain.handle(IPC.MCP_REMOVE, async (_event, { name, scope }: { name: string; scope: string }) => {
+  log(`IPC MCP_REMOVE: ${name} scope=${scope}`)
+  try {
+    await runClaudeCmd(['mcp', 'remove', '-s', scope, name], 10000)
+    return { ok: true }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log(`MCP_REMOVE error: ${msg}`)
+    return { ok: false, error: msg }
+  }
 })
 
 // ─── Theme Detection ───

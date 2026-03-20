@@ -23,14 +23,18 @@ export interface CluiAPI {
   transcribeAudio(audioBase64: string): Promise<{ error: string | null; transcript: string | null }>
   getDiagnostics(): Promise<any>
   respondPermission(tabId: string, questionId: string, optionId: string): Promise<boolean>
-  initSession(tabId: string): void
+  initSession(tabId: string, systemPrompt?: string): void
   resetTabSession(tabId: string): void
   listSessions(projectPath?: string): Promise<SessionMeta[]>
   loadSession(sessionId: string, projectPath?: string, projectDir?: string): Promise<SessionLoadMessage[]>
+  resolveProjectDir(projectDir: string): Promise<string>
+  resolveSessionDir(sessionId: string): Promise<string>
   fetchMarketplace(forceRefresh?: boolean): Promise<{ plugins: CatalogPlugin[]; error: string | null }>
   listInstalledPlugins(): Promise<string[]>
   installPlugin(repo: string, pluginName: string, marketplace: string, sourcePath?: string, isSkillMd?: boolean): Promise<{ ok: boolean; error?: string }>
   uninstallPlugin(pluginName: string): Promise<{ ok: boolean; error?: string }>
+  mcpAdd(name: string, json: string, scope: string): Promise<{ ok: boolean; error?: string }>
+  mcpRemove(name: string, scope: string): Promise<{ ok: boolean; error?: string }>
   setPermissionMode(mode: string): void
   getTheme(): Promise<{ isDark: boolean }>
   onThemeChange(callback: (isDark: boolean) => void): () => void
@@ -50,6 +54,8 @@ export interface CluiAPI {
   onError(callback: (tabId: string, error: EnrichedError) => void): () => void
   onSkillStatus(callback: (status: { name: string; state: string; error?: string; reason?: string }) => void): () => void
   onWindowShown(callback: () => void): () => void
+  onWindowWillHide(callback: () => void): () => void
+  notifyNative(payload: { title: string; body: string }): void
 }
 
 const api: CluiAPI = {
@@ -74,16 +80,20 @@ const api: CluiAPI = {
   getDiagnostics: () => ipcRenderer.invoke(IPC.GET_DIAGNOSTICS),
   respondPermission: (tabId, questionId, optionId) =>
     ipcRenderer.invoke(IPC.RESPOND_PERMISSION, { tabId, questionId, optionId }),
-  initSession: (tabId) => ipcRenderer.send(IPC.INIT_SESSION, tabId),
+  initSession: (tabId, systemPrompt) => ipcRenderer.send(IPC.INIT_SESSION, tabId, systemPrompt),
   resetTabSession: (tabId) => ipcRenderer.send(IPC.RESET_TAB_SESSION, tabId),
   listSessions: (projectPath?: string) => ipcRenderer.invoke(IPC.LIST_SESSIONS, projectPath),
   loadSession: (sessionId: string, projectPath?: string, projectDir?: string) => ipcRenderer.invoke(IPC.LOAD_SESSION, { sessionId, projectPath, projectDir }),
+  resolveProjectDir: (projectDir: string) => ipcRenderer.invoke(IPC.RESOLVE_PROJECT_DIR, projectDir),
+  resolveSessionDir: (sessionId: string) => ipcRenderer.invoke(IPC.RESOLVE_SESSION_DIR, sessionId),
   fetchMarketplace: (forceRefresh) => ipcRenderer.invoke(IPC.MARKETPLACE_FETCH, { forceRefresh }),
   listInstalledPlugins: () => ipcRenderer.invoke(IPC.MARKETPLACE_INSTALLED),
   installPlugin: (repo, pluginName, marketplace, sourcePath, isSkillMd) =>
     ipcRenderer.invoke(IPC.MARKETPLACE_INSTALL, { repo, pluginName, marketplace, sourcePath, isSkillMd }),
   uninstallPlugin: (pluginName) =>
     ipcRenderer.invoke(IPC.MARKETPLACE_UNINSTALL, { pluginName }),
+  mcpAdd: (name, json, scope) => ipcRenderer.invoke(IPC.MCP_ADD, { name, json, scope }),
+  mcpRemove: (name, scope) => ipcRenderer.invoke(IPC.MCP_REMOVE, { name, scope }),
   setPermissionMode: (mode) => ipcRenderer.send(IPC.SET_PERMISSION_MODE, mode),
   getTheme: () => ipcRenderer.invoke(IPC.GET_THEME),
   onThemeChange: (callback) => {
@@ -140,6 +150,14 @@ const api: CluiAPI = {
     ipcRenderer.on(IPC.WINDOW_SHOWN, handler)
     return () => ipcRenderer.removeListener(IPC.WINDOW_SHOWN, handler)
   },
+
+  onWindowWillHide: (callback) => {
+    const handler = () => callback()
+    ipcRenderer.on(IPC.WINDOW_WILL_HIDE, handler)
+    return () => ipcRenderer.removeListener(IPC.WINDOW_WILL_HIDE, handler)
+  },
+
+  notifyNative: (payload) => ipcRenderer.send(IPC.NOTIFY_NATIVE, payload),
 }
 
 contextBridge.exposeInMainWorld('clui', api)

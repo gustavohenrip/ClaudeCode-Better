@@ -2,6 +2,7 @@ import { spawn, execSync, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
 import { join } from 'path'
+import { existsSync, readdirSync, statSync } from 'fs'
 import { StreamParser } from '../stream-parser'
 import { normalize } from './event-normalizer'
 import { log as _log } from '../logger'
@@ -66,16 +67,12 @@ export interface RunHandle {
   process: ChildProcess
   pid: number | null
   startedAt: number
-  /** Ring buffer of last N stderr lines */
   stderrTail: string[]
-  /** Ring buffer of last N stdout lines */
   stdoutTail: string[]
-  /** Count of tool calls seen during this run */
   toolCallCount: number
-  /** Whether any permission_request event was seen during this run */
   sawPermissionRequest: boolean
-  /** Permission denials from result event */
   permissionDenials: Array<{ tool_name: string; tool_use_id: string }>
+  keepAlive: boolean
 }
 
 /**
@@ -135,8 +132,51 @@ export class RunManager extends EventEmitter {
     return env
   }
 
-  startRun(requestId: string, options: RunOptions): RunHandle {
-    const cwd = options.projectPath === '~' ? homedir() : options.projectPath
+  private _resolveSessionCwd(sessionId: string): string | null {
+    const projectsBase = join(homedir(), '.claude', 'projects')
+    try {
+      const dirs = readdirSync(projectsBase)
+      for (const dir of dirs) {
+        if (existsSync(join(projectsBase, dir, `${sessionId}.jsonl`))) {
+          return this._decodeEncodedDir(dir)
+        }
+      }
+    } catch {}
+    return null
+  }
+
+  private _decodeEncodedDir(encoded: string): string {
+    if (!encoded.startsWith('-')) return homedir()
+    const parts = encoded.slice(1).split('-')
+    const result = this._dfsDecode(parts, 0, '')
+    return result || homedir()
+  }
+
+  private _dfsDecode(parts: string[], idx: number, current: string): string | null {
+    if (idx >= parts.length) return existsSync(current) ? current : null
+    for (let take = 1; idx + take <= parts.length; take++) {
+      const component = parts.slice(idx, idx + take).join('-')
+      const next = current + '/' + component
+      if (idx + take === parts.length) {
+        if (existsSync(next)) return next
+      } else {
+        try {
+          if (existsSync(next) && statSync(next).isDirectory()) {
+            const found = this._dfsDecode(parts, idx + take, next)
+            if (found) return found
+          }
+        } catch {}
+      }
+    }
+    return null
+  }
+
+  startRun(requestId: string, options: RunOptions, flags?: { keepAlive?: boolean; skipPrompt?: boolean }): RunHandle {
+    let cwd = options.projectPath === '~' ? homedir() : options.projectPath
+    if (options.sessionId) {
+      const sessionCwd = this._resolveSessionCwd(options.sessionId)
+      if (sessionCwd) cwd = sessionCwd
+    }
 
     const args: string[] = [
       '-p',
@@ -222,24 +262,22 @@ export class RunManager extends EventEmitter {
       toolCallCount: 0,
       sawPermissionRequest: false,
       permissionDenials: [],
+      keepAlive: flags?.keepAlive ?? false,
     }
 
     // ─── stdout → NDJSON parser → normalizer → events ───
     const parser = StreamParser.fromStream(child.stdout!)
 
     parser.on('event', (raw: ClaudeEvent) => {
-      // Track session ID
       if (raw.type === 'system' && 'subtype' in raw && raw.subtype === 'init') {
         handle.sessionId = (raw as any).session_id
       }
 
-      // Track permission_request events
       if (raw.type === 'permission_request' || (raw.type === 'system' && 'subtype' in raw && (raw as any).subtype === 'permission_request')) {
         handle.sawPermissionRequest = true
-        log(`Permission request seen [${requestId}]`)
+        log(`Permission request seen [${handle.runId}]`)
       }
 
-      // Extract permission_denials from result event
       if (raw.type === 'result') {
         const denials = (raw as any).permission_denials
         if (Array.isArray(denials) && denials.length > 0) {
@@ -247,69 +285,89 @@ export class RunManager extends EventEmitter {
             tool_name: d.tool_name || '',
             tool_use_id: d.tool_use_id || '',
           }))
-          log(`Permission denials [${requestId}]: ${JSON.stringify(handle.permissionDenials)}`)
+          log(`Permission denials [${handle.runId}]: ${JSON.stringify(handle.permissionDenials)}`)
         }
       }
 
-      // Ring buffer stdout lines (raw JSON for diagnostics)
       this._ringPush(handle.stdoutTail, JSON.stringify(raw).substring(0, 300))
 
-      // Emit raw event for debugging
-      this.emit('raw', requestId, raw)
+      this.emit('raw', handle.runId, raw)
 
-      // Normalize and emit canonical events
       const normalized = normalize(raw)
       for (const evt of normalized) {
         if (evt.type === 'tool_call') handle.toolCallCount++
-        this.emit('normalized', requestId, evt)
+        this.emit('normalized', handle.runId, evt)
       }
 
-      // Close stdin after result event — with stream-json input the process
-      // stays alive waiting for more input; closing stdin triggers clean exit.
       if (raw.type === 'result') {
-        log(`Run complete [${requestId}]: sawPermissionRequest=${handle.sawPermissionRequest}, denials=${handle.permissionDenials.length}`)
-        try { child.stdin?.end() } catch {}
+        const r = raw as any
+        log(`Run complete [${handle.runId}]: is_error=${r.is_error} result=${(r.result || '').substring(0, 300)} sawPerm=${handle.sawPermissionRequest} denials=${handle.permissionDenials.length}`)
+        if (!handle.keepAlive || r.is_error) {
+          try { child.stdin?.end() } catch {}
+        }
       }
     })
 
     parser.on('parse-error', (line: string) => {
-      log(`Parse error [${requestId}]: ${line.substring(0, 200)}`)
+      log(`Parse error [${handle.runId}]: ${line.substring(0, 200)}`)
       this._ringPush(handle.stderrTail, `[parse-error] ${line.substring(0, 200)}`)
     })
 
-    // ─── stderr ring buffer ───
     child.stderr?.setEncoding('utf-8')
     child.stderr?.on('data', (data: string) => {
       const lines = data.split('\n').filter((l: string) => l.trim())
       for (const line of lines) {
         this._ringPush(handle.stderrTail, line)
       }
-      log(`Stderr [${requestId}]: ${data.trim().substring(0, 500)}`)
+      log(`Stderr [${handle.runId}]: ${data.trim().substring(0, 500)}`)
     })
 
-    // ─── Process lifecycle ───
-    // Snapshot diagnostics BEFORE deleting the handle so callers can still read them.
     child.on('close', (code, signal) => {
-      log(`Process closed [${requestId}]: code=${code} signal=${signal}`)
-      // Move handle to finished map so getEnrichedError still works after exit
-      this._finishedRuns.set(requestId, handle)
-      this.activeRuns.delete(requestId)
-      this.emit('exit', requestId, code, signal, handle.sessionId)
-      // Clean up finished run after a short delay (gives callers time to read diagnostics)
-      setTimeout(() => this._finishedRuns.delete(requestId), 5000)
+      const rid = handle.runId
+      log(`Process closed [${rid}]: code=${code} signal=${signal}`)
+      this._finishedRuns.set(rid, handle)
+      this.activeRuns.delete(rid)
+      this.emit('exit', rid, code, signal, handle.sessionId)
+      setTimeout(() => this._finishedRuns.delete(rid), 5000)
     })
 
     child.on('error', (err) => {
-      log(`Process error [${requestId}]: ${err.message}`)
-      this._finishedRuns.set(requestId, handle)
-      this.activeRuns.delete(requestId)
-      this.emit('error', requestId, err)
-      setTimeout(() => this._finishedRuns.delete(requestId), 5000)
+      const rid = handle.runId
+      log(`Process error [${rid}]: ${err.message}`)
+      this._finishedRuns.set(rid, handle)
+      this.activeRuns.delete(rid)
+      this.emit('error', rid, err)
+      setTimeout(() => this._finishedRuns.delete(rid), 5000)
     })
 
-    // ─── Write prompt to stdin (stream-json format, keep open) ───
-    // Using --input-format stream-json for bidirectional communication.
-    // Stdin stays open so follow-up messages can be sent.
+    if (!flags?.skipPrompt) {
+      const userMessage = JSON.stringify({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: options.prompt }],
+        },
+      })
+      child.stdin!.write(userMessage + '\n')
+    }
+
+    this.activeRuns.set(requestId, handle)
+    return handle
+  }
+
+  reuseRun(oldRequestId: string, newRequestId: string, options: RunOptions): RunHandle | null {
+    const handle = this.activeRuns.get(oldRequestId)
+    if (!handle) return null
+    if (!handle.process.stdin || handle.process.stdin.destroyed) return null
+    if (handle.process.exitCode !== null) return null
+
+    this.activeRuns.delete(oldRequestId)
+    handle.runId = newRequestId
+    handle.startedAt = Date.now()
+    handle.toolCallCount = 0
+    handle.sawPermissionRequest = false
+    handle.permissionDenials = []
+
     const userMessage = JSON.stringify({
       type: 'user',
       message: {
@@ -317,9 +375,10 @@ export class RunManager extends EventEmitter {
         content: [{ type: 'text', text: options.prompt }],
       },
     })
-    child.stdin!.write(userMessage + '\n')
+    handle.process.stdin.write(userMessage + '\n')
 
-    this.activeRuns.set(requestId, handle)
+    this.activeRuns.set(newRequestId, handle)
+    log(`Reused process PID ${handle.pid}: ${oldRequestId.substring(0, 8)}… → ${newRequestId.substring(0, 8)}…`)
     return handle
   }
 

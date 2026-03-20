@@ -121,6 +121,26 @@ async function playNotificationIfHidden(): Promise<void> {
   } catch {}
 }
 
+// ─── Window visibility flag (kept in sync by App.tsx) ───
+let _windowVisible = true
+export function setWindowVisibility(visible: boolean): void {
+  _windowVisible = visible
+}
+
+function pathBasename(p: string): string {
+  if (!p) return ''
+  return p.replace(/\\/g, '/').split('/').filter(Boolean).pop() || ''
+}
+
+function sendTaskNotification(tabId: string, tab: { title: string; workingDirectory: string }, durationMs: number, activeTabId: string): void {
+  if (_windowVisible && tabId === activeTabId) return
+  const dir = pathBasename(tab.workingDirectory)
+  const label = (tab.title && tab.title !== 'New Tab') ? tab.title : (dir || 'Claude')
+  const secs = durationMs > 0 ? Math.round(durationMs / 1000) : 0
+  const body = secs > 0 ? `Completed in ${secs}s${dir ? ` • ${dir}` : ''}` : `Task completed${dir ? ` • ${dir}` : ''}`
+  try { window.clui.notifyNative({ title: label, body }) } catch {}
+}
+
 function makeLocalTab(): TabState {
   return {
     id: crypto.randomUUID(),
@@ -200,27 +220,19 @@ export const useSessionStore = create<State>((set, get) => ({
 
   createTab: async () => {
     const homeDir = get().staticInfo?.homePath || '~'
-    try {
-      const { tabId } = await window.clui.createTab()
-      const tab: TabState = {
-        ...makeLocalTab(),
-        id: tabId,
-        workingDirectory: homeDir,
-      }
-      set((s) => ({
-        tabs: [...s.tabs, tab],
-        activeTabId: tab.id,
-      }))
-      return tabId
-    } catch {
-      const tab = makeLocalTab()
-      tab.workingDirectory = homeDir
-      set((s) => ({
-        tabs: [...s.tabs, tab],
-        activeTabId: tab.id,
-      }))
-      return tab.id
+    const { tabId } = await window.clui.createTab()
+    const tab: TabState = {
+      ...makeLocalTab(),
+      id: tabId,
+      workingDirectory: homeDir,
     }
+    set((s) => ({
+      tabs: [...s.tabs, tab],
+      activeTabId: tab.id,
+    }))
+    const rules = useThemeStore.getState().globalRules?.trim()
+    window.clui.initSession(tabId, rules || undefined)
+    return tabId
   },
 
   selectTab: (tabId) => {
@@ -363,7 +375,16 @@ export const useSessionStore = create<State>((set, get) => ({
     if (s.activeTabId === tabId) {
       if (remaining.length === 0) {
         const newTab = makeLocalTab()
-        set({ tabs: [newTab], activeTabId: newTab.id })
+        const localId = newTab.id
+        set({ tabs: [newTab], activeTabId: localId })
+        window.clui.createTab().then(({ tabId }) => {
+          const rules = useThemeStore.getState().globalRules?.trim()
+          set((s) => ({
+            tabs: s.tabs.map((t) => t.id === localId ? { ...t, id: tabId } : t),
+            activeTabId: s.activeTabId === localId ? tabId : s.activeTabId,
+          }))
+          window.clui.initSession(tabId, rules || undefined)
+        }).catch(() => {})
         return
       }
       const closedIndex = s.tabs.findIndex((t) => t.id === tabId)
@@ -386,49 +407,38 @@ export const useSessionStore = create<State>((set, get) => ({
   },
 
   resumeSession: async (sessionId, title, projectPath, projectDir) => {
-    const defaultDir = projectPath || get().staticInfo?.homePath || '~'
-    try {
-      const { tabId } = await window.clui.createTab()
+    const resolvedDir = projectPath
+      ? null
+      : await window.clui.resolveSessionDir(sessionId).catch(() => null)
+    const defaultDir = projectPath || resolvedDir || get().staticInfo?.homePath || '~'
+    const { tabId } = await window.clui.createTab()
 
-      const history = await window.clui.loadSession(sessionId, projectPath, projectDir).catch(() => [])
-      const messages: Message[] = history.map((m) => ({
-        id: nextMsgId(),
-        role: m.role as Message['role'],
-        content: m.content,
-        toolName: m.toolName,
-        toolStatus: m.toolName ? 'completed' as const : undefined,
-        timestamp: m.timestamp,
-      }))
+    const history = await window.clui.loadSession(sessionId, projectPath, projectDir).catch(() => [])
+    const messages: Message[] = history.map((m) => ({
+      id: nextMsgId(),
+      role: m.role as Message['role'],
+      content: m.content,
+      toolName: m.toolName,
+      toolInput: m.toolInput,
+      toolStatus: m.toolName ? 'completed' as const : undefined,
+      timestamp: m.timestamp,
+    }))
 
-      const tab: TabState = {
-        ...makeLocalTab(),
-        id: tabId,
-        claudeSessionId: sessionId,
-        title: title || 'Resumed Session',
-        workingDirectory: defaultDir,
-        hasChosenDirectory: !!projectPath,
-        messages,
-      }
-      set((s) => ({
-        tabs: [...s.tabs, tab],
-        activeTabId: tab.id,
-        isExpanded: true,
-      }))
-      // Don't call initSession — the first real prompt will use --resume with the sessionId
-      return tabId
-    } catch {
-      const tab = makeLocalTab()
-      tab.claudeSessionId = sessionId
-      tab.title = title || 'Resumed Session'
-      tab.workingDirectory = defaultDir
-      tab.hasChosenDirectory = !!projectPath
-      set((s) => ({
-        tabs: [...s.tabs, tab],
-        activeTabId: tab.id,
-        isExpanded: true,
-      }))
-      return tab.id
+    const tab: TabState = {
+      ...makeLocalTab(),
+      id: tabId,
+      claudeSessionId: sessionId,
+      title: title || 'Resumed Session',
+      workingDirectory: defaultDir,
+      hasChosenDirectory: !!(projectPath || resolvedDir),
+      messages,
     }
+    set((s) => ({
+      tabs: [...s.tabs, tab],
+      activeTabId: tab.id,
+      isExpanded: true,
+    }))
+    return tabId
   },
 
   addSystemMessage: (content) => {
@@ -561,12 +571,11 @@ export const useSessionStore = create<State>((set, get) => ({
     const resolvedPath = projectPath || (tab?.hasChosenDirectory ? tab.workingDirectory : (staticInfo?.homePath || tab?.workingDirectory || '~'))
     if (!tab) return
 
-    if (tab.status === 'connecting' && tab.currentActivity !== 'Interrupting...') return
+    if (tab.status === 'connecting') return
 
-    const isBusy = tab.status === 'running' || (tab.status === 'connecting' && tab.currentActivity === 'Interrupting...')
+    const isBusy = tab.status === 'running'
     const requestId = crypto.randomUUID()
 
-    // Build full prompt with attachment context
     let fullPrompt = prompt
     if (tab.attachments.length > 0) {
       const attachmentCtx = tab.attachments
@@ -579,36 +588,48 @@ export const useSessionStore = create<State>((set, get) => ({
       ? (prompt.length > 30 ? prompt.substring(0, 27) + '...' : prompt)
       : tab.title
 
-    // Optimistic update: clear attachments
-    // If busy, add to queuedPrompts (shown at bottom); otherwise add to messages and set connecting
-    set((s) => ({
-      tabs: s.tabs.map((t) => {
-        if (t.id !== activeTabId) return t
-        const withEffectiveBase = t.hasChosenDirectory
-          ? t
-          : {
-              ...t,
-              hasChosenDirectory: true,
-              workingDirectory: resolvedPath,
-            }
-        return {
-          ...withEffectiveBase,
-          status: isBusy ? ('connecting' as TabStatus) : ('connecting' as TabStatus),
-          activeRequestId: requestId,
-          currentActivity: isBusy ? 'Interrupting...' : 'Starting...',
-          title,
-          attachments: [],
-          queuedPrompts: [],
-          messages: [
-            ...withEffectiveBase.messages,
-            { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
-          ],
-        }
-      }),
-    }))
+    if (isBusy) {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== activeTabId) return t
+          return {
+            ...t,
+            title,
+            attachments: [],
+            queuedPrompts: [...t.queuedPrompts, prompt],
+            messages: [
+              ...t.messages,
+              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
+            ],
+          }
+        }),
+      }))
+    } else {
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== activeTabId) return t
+          const withEffectiveBase = t.hasChosenDirectory
+            ? t
+            : { ...t, hasChosenDirectory: true, workingDirectory: resolvedPath }
+          return {
+            ...withEffectiveBase,
+            status: 'connecting' as TabStatus,
+            activeRequestId: requestId,
+            currentActivity: prompt.trim() === '/compact' ? 'Compacting...' : (tab.claudeSessionId ? 'Thinking...' : 'Starting...'),
+            title,
+            attachments: [],
+            queuedPrompts: [],
+            messages: [
+              ...withEffectiveBase.messages,
+              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
+            ],
+          }
+        }),
+      }))
+    }
 
     const { preferredModel } = get()
-    const { effort, thinkingEnabled } = useThemeStore.getState()
+    const { effort, thinkingEnabled, globalRules } = useThemeStore.getState()
     const effectiveEffort: EffortLevel = (effort === 'max' && !MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel)))
       ? 'high'
       : effort
@@ -619,14 +640,11 @@ export const useSessionStore = create<State>((set, get) => ({
       model: preferredModel || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
       effort: effectiveEffort !== 'medium' ? effectiveEffort : undefined,
-      thinking: thinkingEnabled ? 'adaptive' : 'disabled',
+      thinking: (thinkingEnabled ? 'adaptive' : 'disabled') as 'adaptive' | 'disabled',
+      systemPrompt: globalRules.trim() || undefined,
     }
 
-    const sendFn = isBusy
-      ? window.clui.interruptAndSend(activeTabId, requestId, runOptions)
-      : window.clui.prompt(activeTabId, requestId, runOptions)
-
-    sendFn.catch((err: Error) => {
+    window.clui.prompt(activeTabId, requestId, runOptions).catch((err: Error) => {
       get().handleError(activeTabId, {
         message: err.message,
         stderrTail: [],
@@ -853,6 +871,8 @@ export const useSessionStore = create<State>((set, get) => ({
             }
             // Play notification sound if window is hidden
             playNotificationIfHidden()
+            // Show system notification (hidden window OR background tab)
+            sendTaskNotification(tabId, updated, event.durationMs || 0, activeTabId)
             break
 
           case 'error':
@@ -914,6 +934,18 @@ export const useSessionStore = create<State>((set, get) => ({
               ]
             }
             break
+
+          case 'compact_complete': {
+            const freed = event.clearedTokens >= 1000
+              ? `${Math.round(event.clearedTokens / 1000)}k`
+              : String(event.clearedTokens)
+            updated.currentActivity = 'Thinking...'
+            updated.messages = [
+              ...updated.messages,
+              { id: nextMsgId(), role: 'system' as const, content: `Context compacted — ${freed} tokens freed`, timestamp: Date.now() },
+            ]
+            break
+          }
         }
 
         return updated

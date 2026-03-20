@@ -281,6 +281,7 @@ interface ThemeState {
   expandedUI: boolean
   effort: EffortLevel
   thinkingEnabled: boolean
+  globalRules: string
   /** OS-reported dark mode — used when themeMode is 'system' */
   _systemIsDark: boolean
   setIsDark: (isDark: boolean) => void
@@ -289,6 +290,7 @@ interface ThemeState {
   setExpandedUI: (expanded: boolean) => void
   setEffort: (effort: EffortLevel) => void
   setThinkingEnabled: (enabled: boolean) => void
+  setGlobalRules: (rules: string) => void
   /** Called by OS theme change listener — updates system value */
   setSystemTheme: (isDark: boolean) => void
 }
@@ -313,6 +315,15 @@ function applyTheme(isDark: boolean): void {
 }
 
 const SETTINGS_KEY = 'clui-settings'
+const GLOBAL_RULES_KEY = 'clui-global-rules'
+
+function loadGlobalRules(): string {
+  try { return localStorage.getItem(GLOBAL_RULES_KEY) || '' } catch { return '' }
+}
+
+function saveGlobalRules(rules: string): void {
+  try { localStorage.setItem(GLOBAL_RULES_KEY, rules) } catch {}
+}
 
 function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean } {
   try {
@@ -344,6 +355,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   expandedUI: saved.expandedUI,
   effort: saved.effort,
   thinkingEnabled: saved.thinkingEnabled,
+  globalRules: loadGlobalRules(),
   _systemIsDark: typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true,
   setIsDark: (isDark) => {
     set({ isDark })
@@ -375,6 +387,10 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     set({ thinkingEnabled })
     const s = get()
     saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled })
+  },
+  setGlobalRules: (rules) => {
+    set({ globalRules: rules })
+    saveGlobalRules(rules)
   },
   setSystemTheme: (isDark) => {
     const s = get()

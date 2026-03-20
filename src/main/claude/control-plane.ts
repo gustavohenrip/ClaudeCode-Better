@@ -75,8 +75,9 @@ export class ControlPlane extends EventEmitter {
   private runTokens = new Map<string, string>()
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves */
   private permissionMode: 'ask' | 'auto' = 'ask'
-  /** Resolves when the permission server is ready (or failed). Dispatch awaits this. */
   private hookServerReady: Promise<void>
+  private warmHandles = new Map<string, { requestId: string; cwd: string }>()
+  private resumedRequests = new Map<string, { tabId: string; options: RunOptions }>()
 
   constructor(interactivePty = false) {
     super()
@@ -149,12 +150,11 @@ export class ControlPlane extends EventEmitter {
 
       tab.lastActivityAt = Date.now()
 
-      // Handle session init
       if (event.type === 'session_init') {
         tab.claudeSessionId = event.sessionId
+        this.resumedRequests.delete(requestId)
 
         if (this.initRequestIds.has(requestId)) {
-          // Warmup init — emit session_init with isWarmup flag, don't change status
           this.emit('event', tabId, { ...event, isWarmup: true })
           return
         }
@@ -164,30 +164,70 @@ export class ControlPlane extends EventEmitter {
         }
       }
 
-      // Suppress all events from init requests (session_init already handled above)
       if (this.initRequestIds.has(requestId)) {
         return
       }
 
-      this.emit('event', tabId, event)
+      if (event.type === 'error' && this.resumedRequests.has(requestId)) {
+        return
+      }
+
+      if (event.type === 'error' && event.message === 'Unknown error') {
+        const handle = this.runManager.getHandle(requestId)
+        if (handle) {
+          const stderrHint = handle.stderrTail.slice(-3).join(' ').substring(0, 200)
+          if (stderrHint) {
+            this.emit('event', tabId, { ...event, message: stderrHint })
+          } else {
+            this.emit('event', tabId, event)
+          }
+        } else {
+          this.emit('event', tabId, event)
+        }
+      } else {
+        this.emit('event', tabId, event)
+      }
+
+      if (event.type === 'task_complete') {
+        const handle = this.runManager.getHandle(requestId)
+        if (handle?.keepAlive) {
+          const inflight = this.inflightRequests.get(requestId)
+          if (inflight) {
+            inflight.resolve()
+            this.inflightRequests.delete(requestId)
+          }
+          tab.activeRequestId = null
+          tab.runPid = null
+
+          this._setTabStatus(tabId, 'completed')
+
+          this.warmHandles.set(tabId, { requestId, cwd: '' })
+          log(`Process kept warm for tab ${tabId.substring(0, 8)}… (PID ${handle.pid})`)
+
+          this._processQueue(tabId)
+        }
+      }
     })
 
     this.runManager.on('exit', (requestId: string, code: number | null, signal: string | null, sessionId: string | null) => {
-      // Clean up per-run token
       const runToken = this.runTokens.get(requestId)
       if (runToken) {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
 
-      const tabId = this._findTabByRequest(requestId)
+      for (const [wTabId, warm] of this.warmHandles) {
+        if (warm.requestId === requestId) {
+          this.warmHandles.delete(wTabId)
+          log(`Warm process died for tab ${wTabId.substring(0, 8)}…`)
+          break
+        }
+      }
 
-      // Always clean up inflight promise, even if tab was already closed.
-      // This prevents leaked promises when closeTab() races with process exit.
+      const tabId = this._findTabByRequest(requestId)
       const inflight = this.inflightRequests.get(requestId)
 
       if (!tabId || !this.tabs.get(tabId)) {
-        // Tab was already closed — just resolve/reject the orphaned promise
         if (inflight) {
           inflight.resolve()
           this.inflightRequests.delete(requestId)
@@ -199,15 +239,23 @@ export class ControlPlane extends EventEmitter {
 
       if (this.staleRequests.has(requestId)) {
         this.staleRequests.delete(requestId)
+        const wasInit = this.initRequestIds.delete(requestId)
         if (tab.activeRequestId === requestId) {
           tab.activeRequestId = null
           tab.runPid = null
         }
-        if (sessionId) tab.claudeSessionId = sessionId
+        if (sessionId && !wasInit) tab.claudeSessionId = sessionId
         if (inflight) {
           inflight.resolve()
           this.inflightRequests.delete(requestId)
         }
+        return
+      }
+
+      if (!inflight && tab.activeRequestId !== requestId) {
+        tab.runPid = null
+        this.initRequestIds.delete(requestId)
+        if (sessionId) tab.claudeSessionId = sessionId
         return
       }
 
@@ -227,6 +275,23 @@ export class ControlPlane extends EventEmitter {
         return
       }
 
+      const resumeRetry = this.resumedRequests.get(requestId)
+      if (resumeRetry && signal !== 'SIGINT' && signal !== 'SIGKILL') {
+        this.resumedRequests.delete(requestId)
+        log(`Resume failed for tab ${tabId.substring(0, 8)}… — retrying without --resume`)
+        tab.claudeSessionId = null
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        const retryId = `retry-${crypto.randomUUID().substring(0, 8)}`
+        this._dispatch(tabId, retryId, resumeRetry.options).catch((err) => {
+          log(`Retry without resume failed: ${(err as Error).message}`)
+          this._setTabStatus(tabId, 'failed')
+        })
+        return
+      }
+
       if (code === 0) {
         this._setTabStatus(tabId, 'completed')
       } else if (signal === 'SIGINT' || signal === 'SIGKILL') {
@@ -242,6 +307,7 @@ export class ControlPlane extends EventEmitter {
         this.inflightRequests.delete(requestId)
       }
 
+      this.resumedRequests.delete(requestId)
       this._processQueue(tabId)
     })
 
@@ -296,10 +362,25 @@ export class ControlPlane extends EventEmitter {
         return
       }
 
+      const resumeRetry = this.resumedRequests.get(requestId)
+      if (resumeRetry) {
+        this.resumedRequests.delete(requestId)
+        log(`Resume process error for tab ${tabId.substring(0, 8)}… — retrying without --resume`)
+        tab.claudeSessionId = null
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        const retryId = `retry-${crypto.randomUUID().substring(0, 8)}`
+        this._dispatch(tabId, retryId, resumeRetry.options).catch((e) => {
+          log(`Retry without resume failed: ${(e as Error).message}`)
+          this._setTabStatus(tabId, 'failed')
+        })
+        return
+      }
+
       this._setTabStatus(tabId, 'dead')
 
-      // Use enriched diagnostics — _finishedRuns holds the handle with
-      // stderr/stdout ring buffers even after the process errored out.
       const enriched = this.runManager.getEnrichedError(requestId, null)
       enriched.message = err.message
       this.emit('error', tabId, enriched)
@@ -474,24 +555,58 @@ export class ControlPlane extends EventEmitter {
     return tabId
   }
 
-  /**
-   * Eagerly initialize a session for a tab by running a minimal prompt.
-   * Populates session metadata (model, MCP servers, tools) without visible messages.
-   */
-  initSession(tabId: string): void {
+  initSession(tabId: string, systemPrompt?: string): void {
     const tab = this.tabs.get(tabId)
     if (!tab) return
+    if (this.warmHandles.has(tabId)) return
+    if (tab.activeRequestId) return
 
-    const requestId = `init-${tabId}`
+    const requestId = `warm-${tabId}`
     this.initRequestIds.add(requestId)
 
-    this.submitPrompt(tabId, requestId, {
-      prompt: 'hi',
-      projectPath: process.cwd(),
-      maxTurns: 1,
+    const cwd = process.env.HOME || process.cwd()
+
+    Promise.race([
+      this.hookServerReady,
+      new Promise<void>((r) => setTimeout(r, 150)),
+    ]).then(() => {
+      if (!this.tabs.has(tabId)) {
+        this.initRequestIds.delete(requestId)
+        return
+      }
+
+      const runOptions: RunOptions = {
+        prompt: '',
+        projectPath: cwd,
+        cliPermissionMode: this.permissionMode === 'auto' ? 'bypassPermissions' : undefined,
+        systemPrompt: systemPrompt || undefined,
+      }
+
+      if (this.permissionServer.getPort()) {
+        const runToken = this.permissionServer.registerRun(tabId, requestId, null)
+        this.runTokens.set(requestId, runToken)
+        try {
+          runOptions.hookSettingsPath = this.permissionServer.generateSettingsFile(runToken)
+        } catch (err) {
+          log(`Failed to generate hook settings: ${(err as Error).message}`)
+          this.permissionServer.unregisterRun(runToken)
+          this.runTokens.delete(requestId)
+        }
+      }
+
+      try {
+        const handle = this.runManager.startRun(requestId, runOptions, { keepAlive: true, skipPrompt: true })
+        this.warmHandles.set(tabId, { requestId, cwd })
+        log(`Warm process spawned for tab ${tabId.substring(0, 8)}…: PID ${handle.pid}`)
+      } catch (err) {
+        this.initRequestIds.delete(requestId)
+        const rt = this.runTokens.get(requestId)
+        if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(requestId) }
+        log(`Failed to spawn warm process: ${(err as Error).message}`)
+      }
     }).catch((err) => {
       this.initRequestIds.delete(requestId)
-      log(`Init session failed for tab ${tabId}: ${(err as Error).message}`)
+      log(`Init session failed: ${(err as Error).message}`)
     })
   }
 
@@ -504,6 +619,15 @@ export class ControlPlane extends EventEmitter {
     if (!tab) return
     log(`Resetting session for tab ${tabId} (was: ${tab.claudeSessionId})`)
     tab.claudeSessionId = null
+
+    const warm = this.warmHandles.get(tabId)
+    if (warm) {
+      this.warmHandles.delete(tabId)
+      this.initRequestIds.delete(warm.requestId)
+      this.runManager.cancel(warm.requestId)
+      const rt = this.runTokens.get(warm.requestId)
+      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
+    }
   }
 
   /**
@@ -519,12 +643,18 @@ export class ControlPlane extends EventEmitter {
     const tab = this.tabs.get(tabId)
     if (!tab) return
 
-    // Cancel active run if any
+    const warm = this.warmHandles.get(tabId)
+    if (warm) {
+      this.warmHandles.delete(tabId)
+      this.initRequestIds.delete(warm.requestId)
+      this.runManager.cancel(warm.requestId)
+      const rt = this.runTokens.get(warm.requestId)
+      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
+    }
+
     if (tab.activeRequestId) {
       this.cancel(tab.activeRequestId)
 
-      // Resolve and clean up the inflight promise so it doesn't leak.
-      // The exit handler may never fire for this tab since we're deleting it.
       const inflight = this.inflightRequests.get(tab.activeRequestId)
       if (inflight) {
         inflight.reject(new Error('Tab closed'))
@@ -532,7 +662,6 @@ export class ControlPlane extends EventEmitter {
       }
     }
 
-    // Remove queued requests for this tab, rejecting all waiters
     this.requestQueue = this.requestQueue.filter((r) => {
       if (r.tabId === tabId) {
         const reason = new Error('Tab closed')
@@ -616,16 +745,51 @@ export class ControlPlane extends EventEmitter {
     const tab = this.tabs.get(tabId)
     if (!tab) throw new Error(`Tab ${tabId} disappeared`)
 
-    // Wait for the permission hook server to be ready (or failed).
-    // This prevents early prompts from silently falling back to --allowedTools.
-    await this.hookServerReady
+    const warm = this.warmHandles.get(tabId)
 
-    // Use stored session ID for resume if available and not overridden
-    if (tab.claudeSessionId && !options.sessionId) {
-      options = { ...options, sessionId: tab.claudeSessionId }
+    if (warm) {
+      this.warmHandles.delete(tabId)
+      this.initRequestIds.delete(warm.requestId)
+
+      const oldToken = this.runTokens.get(warm.requestId)
+      if (oldToken) {
+        this.runTokens.delete(warm.requestId)
+        this.runTokens.set(requestId, oldToken)
+      }
+
+      const handle = this.runManager.reuseRun(warm.requestId, requestId, options)
+      if (handle) {
+        tab.activeRequestId = requestId
+        tab.promptCount++
+        tab.lastActivityAt = Date.now()
+        tab.runPid = handle.pid
+        this._setTabStatus(tabId, 'running')
+        log(`Reused warm process for tab ${tabId.substring(0, 8)}… (PID ${handle.pid})`)
+
+        let resolve!: (value: void) => void
+        let reject!: (reason: Error) => void
+        const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej })
+        this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve, reject })
+        return promise
+      }
+
+      log(`Warm process reuse failed for tab ${tabId.substring(0, 8)}… — spawning new`)
+      const rt = this.runTokens.get(warm.requestId)
+      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
     }
 
-    // Per-run token lifecycle: register run, generate per-run settings file
+    await Promise.race([
+      this.hookServerReady,
+      new Promise<void>((r) => setTimeout(r, 150)),
+    ])
+
+    if (!options.sessionId && tab.claudeSessionId) {
+      options = { ...options, sessionId: tab.claudeSessionId }
+    }
+    if (options.sessionId) {
+      this.resumedRequests.set(requestId, { tabId, options: { ...options, sessionId: undefined } })
+    }
+
     if (this.permissionServer.getPort()) {
       const runToken = this.permissionServer.registerRun(tabId, requestId, options.sessionId || null)
       this.runTokens.set(requestId, runToken)
@@ -647,13 +811,11 @@ export class ControlPlane extends EventEmitter {
     if (!this.initRequestIds.has(requestId)) tab.promptCount++
     tab.lastActivityAt = Date.now()
 
-    // Set status to connecting (first run) or running (subsequent)
-    const newStatus: TabStatus = tab.claudeSessionId ? 'running' : 'connecting'
-    this._setTabStatus(tabId, newStatus)
+    if (!this.initRequestIds.has(requestId)) {
+      const newStatus: TabStatus = tab.claudeSessionId ? 'running' : 'connecting'
+      this._setTabStatus(tabId, newStatus)
+    }
 
-    // ─── Pick transport ───
-    // Stream-json is the stable transport for all regular messages.
-    // PTY is reserved for future interactive permission handling only.
     const usePty = false
 
     let pid: number | null = null
@@ -664,19 +826,17 @@ export class ControlPlane extends EventEmitter {
         this.ptyRuns.add(requestId)
         pid = handle.pid
       } else {
-        const handle = this.runManager.startRun(requestId, options)
+        const handle = this.runManager.startRun(requestId, options, { keepAlive: true })
         pid = handle.pid
       }
       tab.runPid = pid
     } catch (err) {
-      // Start failure before inflight registration: rollback tab run state.
       tab.activeRequestId = null
       tab.runPid = null
       this._setTabStatus(tabId, 'failed')
       throw err
     }
 
-    // Create inflight promise
     let resolve!: (value: void) => void
     let reject!: (reason: Error) => void
     const promise = new Promise<void>((res, rej) => {
@@ -895,9 +1055,12 @@ export class ControlPlane extends EventEmitter {
     const inflight = this.inflightRequests.get(requestId)
     if (inflight) return inflight.tabId
 
-    // Also check registry entries
     for (const [tabId, tab] of this.tabs) {
       if (tab.activeRequestId === requestId) return tabId
+    }
+
+    for (const [tabId, warm] of this.warmHandles) {
+      if (warm.requestId === requestId) return tabId
     }
 
     return null

@@ -109,7 +109,7 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
       if (md.context_management?.applied_edits && md.context_management.applied_edits.length > 0) {
         const cleared = md.context_management.applied_edits.reduce((sum, e) => sum + (e.cleared_input_tokens || 0), 0)
         if (cleared > 0) {
-          return [{ type: 'text_chunk', text: `\n[Context compacted — ${Math.round(cleared / 1000)}k tokens cleared]\n` }]
+          return [{ type: 'compact_complete', clearedTokens: cleared }]
         }
       }
       return []

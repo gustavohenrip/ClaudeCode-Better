@@ -10,6 +10,7 @@ import {
 import { useSessionStore, useActiveTab } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
+import { DiffViewer } from './DiffViewer'
 import { useColors, useThemeStore } from '../theme'
 import type { Message } from '../../shared/types'
 
@@ -242,8 +243,9 @@ export function ConversationView() {
           height: 28,
           minHeight: 28,
           marginTop: -28,
-          background: `linear-gradient(to bottom, transparent, ${colors.containerBg} 70%)`,
+          background: colors.containerBg,
           zIndex: 2,
+          pointerEvents: 'none',
         }}
       >
         <div className="flex items-center gap-1.5 text-[11px] min-w-0">
@@ -268,7 +270,7 @@ export function ConversationView() {
               <button
                 onClick={handleRetry}
                 className="flex items-center gap-1 rounded-full px-2 py-0.5 transition-colors"
-                style={{ color: colors.accent, fontSize: 11 }}
+                style={{ color: colors.accent, fontSize: 11, pointerEvents: 'auto' }}
               >
                 <ArrowCounterClockwise size={10} />
                 Retry
@@ -277,7 +279,7 @@ export function ConversationView() {
           )}
         </div>
 
-        <div className="flex items-center flex-shrink-0">
+        <div className="flex items-center flex-shrink-0" style={{ pointerEvents: 'auto' }}>
           <AnimatePresence>
             {showInterrupt && (
               <InterruptButton tabId={tab.id} />
@@ -661,7 +663,8 @@ function getToolDescription(name: string, input?: string): string {
 
 function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boolean }) {
   const hasRunning = tools.some((t) => t.toolStatus === 'running')
-  const [expanded, setExpanded] = useState(false)
+  const hasDiffTool = tools.some((t) => t.toolName === 'Edit' || t.toolName === 'Write')
+  const [expanded, setExpanded] = useState(() => hasDiffTool)
   const colors = useColors()
 
   const isOpen = expanded || hasRunning
@@ -674,8 +677,8 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
             className="flex items-center gap-1 cursor-pointer mb-1.5"
             onClick={() => setExpanded(false)}
           >
-            <CaretDown size={10} style={{ color: colors.textMuted }} />
-            <span className="text-[11px]" style={{ color: colors.textMuted }}>
+            <CaretDown size={10} style={{ color: colors.textTertiary }} />
+            <span className="text-[11px]" style={{ color: colors.textTertiary }}>
               Used {tools.length} tool{tools.length !== 1 ? 's' : ''}
             </span>
           </div>
@@ -721,7 +724,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
                         className="inline-block text-[10px] mt-0.5 px-1.5 py-[1px] rounded"
                         style={{
                           background: tool.toolStatus === 'error' ? colors.statusErrorBg : colors.surfaceHover,
-                          color: tool.toolStatus === 'error' ? colors.statusError : colors.textMuted,
+                          color: tool.toolStatus === 'error' ? colors.statusError : colors.textTertiary,
                         }}
                       >
                         Result
@@ -729,9 +732,14 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
                     )}
 
                     {isRunning && (
-                      <span className="text-[10px] mt-0.5 block" style={{ color: colors.textMuted }}>
+                      <span className="text-[10px] mt-0.5 block" style={{ color: colors.textTertiary }}>
                         running...
                       </span>
+                    )}
+
+                    {!isRunning && tool.toolStatus !== 'error' && tool.toolInput &&
+                      (toolName === 'Edit' || toolName === 'Write') && (
+                      <DiffViewer toolName={toolName} toolInput={tool.toolInput} />
                     )}
                   </div>
                 </div>

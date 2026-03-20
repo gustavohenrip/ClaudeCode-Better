@@ -11,9 +11,25 @@ import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore } from './stores/sessionStore'
 import { useColors, useThemeStore, spacing } from './theme'
+import { setWindowVisibility } from './stores/sessionStore'
 
 const SPRING = { type: 'spring' as const, stiffness: 280, damping: 24, mass: 0.8 }
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
+const EASING_OUT = [0.16, 1, 0.3, 1] as const
+const EASING_IN = [0.4, 0, 1, 1] as const
+
+const ANIM_VISIBLE = { opacity: 1, scale: [0.9, 1.018, 1] as number[], y: [16, -4, 0] as number[] }
+const ANIM_HIDDEN = { opacity: 0, scale: 0.9, y: 10 }
+const TRANS_OPEN = {
+  opacity: { duration: 0.22, ease: EASING_OUT },
+  scale: { duration: 0.5, times: [0, 0.7, 1], ease: EASING_OUT },
+  y: { duration: 0.48, times: [0, 0.68, 1], ease: EASING_OUT },
+}
+const TRANS_CLOSE = {
+  opacity: { duration: 0.14, ease: EASING_IN },
+  scale: { duration: 0.17, ease: EASING_IN },
+  y: { duration: 0.17, ease: EASING_IN },
+}
 
 export default function App() {
   useClaudeEvents()
@@ -27,9 +43,10 @@ export default function App() {
   const [windowVisible, setWindowVisible] = useState(false)
 
   useEffect(() => {
-    const unsub = window.clui.onWindowShown(() => setWindowVisible(true))
-    requestAnimationFrame(() => setWindowVisible(true))
-    return unsub
+    const unsub = window.clui.onWindowShown(() => { setWindowVisible(true); setWindowVisibility(true) })
+    const unsubHide = window.clui.onWindowWillHide(() => { setWindowVisible(false); setWindowVisibility(false) })
+    const raf = requestAnimationFrame(() => { setWindowVisible(true); setWindowVisibility(true) })
+    return () => { unsub(); unsubHide(); cancelAnimationFrame(raf) }
   }, [])
 
   useEffect(() => {
@@ -48,21 +65,24 @@ export default function App() {
     if (savedMode !== 'ask') {
       window.clui.setPermissionMode(savedMode)
     }
+    const firstTab = useSessionStore.getState().tabs[0]
+    if (firstTab) {
+      const localId = firstTab.id
+      window.clui.createTab().then(({ tabId }) => {
+        useSessionStore.setState((s) => ({
+          tabs: s.tabs.map((t) => t.id === localId ? { ...t, id: tabId } : t),
+          activeTabId: s.activeTabId === localId ? tabId : s.activeTabId,
+        }))
+        const rules = useThemeStore.getState().globalRules?.trim()
+        window.clui.initSession(tabId, rules || undefined)
+      }).catch(() => {})
+    }
     useSessionStore.getState().initStaticInfo().then(() => {
       const homeDir = useSessionStore.getState().staticInfo?.homePath || '~'
-      const tab = useSessionStore.getState().tabs[0]
-      if (tab) {
-        useSessionStore.setState((s) => ({
-          tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, workingDirectory: homeDir, hasChosenDirectory: false } : t)),
-        }))
-        window.clui.createTab().then(({ tabId }) => {
-          useSessionStore.setState((s) => ({
-            tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, id: tabId } : t)),
-            activeTabId: tabId,
-          }))
-        }).catch(() => {})
-      }
-    })
+      useSessionStore.setState((s) => ({
+        tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, workingDirectory: homeDir, hasChosenDirectory: false } : t)),
+      }))
+    }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -125,9 +145,9 @@ export default function App() {
       <motion.div
         className="flex flex-col justify-end h-full"
         style={{ background: 'transparent' }}
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={windowVisible ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
-        transition={SPRING}
+        initial={{ opacity: 0, scale: 0.9, y: 16 }}
+        animate={windowVisible ? ANIM_VISIBLE : ANIM_HIDDEN}
+        transition={windowVisible ? TRANS_OPEN : TRANS_CLOSE}
       >
 
         <div style={{ width: contentWidth, position: 'relative', margin: '0 auto', transition: 'width 0.26s cubic-bezier(0.4, 0, 0.1, 1)' }}>
