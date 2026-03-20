@@ -24,10 +24,10 @@ export function PermissionDeniedCard({ tools, sessionId, projectPath, onDismiss 
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8, scale: 0.97 }}
+      initial={{ opacity: 0, y: 8, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -4, scale: 0.97 }}
-      transition={{ duration: 0.2 }}
+      transition={{ type: 'spring', stiffness: 350, damping: 26, mass: 0.7 }}
       className="mx-4 mb-2"
     >
       <div
@@ -39,7 +39,6 @@ export function PermissionDeniedCard({ tools, sessionId, projectPath, onDismiss 
         }}
         className="overflow-hidden"
       >
-        {/* Header */}
         <div
           className="flex items-center gap-2 px-3 py-2"
           style={{
@@ -53,7 +52,6 @@ export function PermissionDeniedCard({ tools, sessionId, projectPath, onDismiss 
           </span>
         </div>
 
-        {/* Body */}
         <div className="px-3 py-2">
           <p className="text-[11px] leading-[1.5] mb-2" style={{ color: colors.textSecondary }}>
             Interactive approvals are not supported in the current CLI mode.
@@ -62,7 +60,6 @@ export function PermissionDeniedCard({ tools, sessionId, projectPath, onDismiss 
             )}
           </p>
 
-          {/* Tool list */}
           {tools.length > 0 && (
             <div className="flex flex-wrap gap-1 mb-2">
               {toolNames.map((name) => (
@@ -82,7 +79,6 @@ export function PermissionDeniedCard({ tools, sessionId, projectPath, onDismiss 
             </div>
           )}
 
-          {/* Actions */}
           <div className="flex gap-1.5">
             {sessionId && (
               <button

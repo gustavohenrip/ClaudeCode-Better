@@ -11,6 +11,12 @@ export const AVAILABLE_MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ] as const
 
+export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-6'])
+
+export function getEffectiveModelId(preferredModel: string | null): string {
+  return preferredModel ?? AVAILABLE_MODELS[0].id
+}
+
 const SESSION_SETTINGS_KEY = 'clui-session-settings'
 
 function loadSessionSettings(): { preferredModel: string | null; permissionMode: 'ask' | 'auto' } {
@@ -138,6 +144,7 @@ function makeLocalTab(): TabState {
     workingDirectory: '~',
     hasChosenDirectory: false,
     additionalDirs: [],
+    tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
   }
 }
 
@@ -179,6 +186,10 @@ export const useSessionStore = create<State>((set, get) => ({
   setPreferredModel: (model) => {
     set({ preferredModel: model })
     saveSessionSettings({ preferredModel: model, permissionMode: get().permissionMode })
+    const supportsMax = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(model))
+    if (!supportsMax && useThemeStore.getState().effort === 'max') {
+      useThemeStore.getState().setEffort('high')
+    }
   },
 
   setPermissionMode: (mode) => {
@@ -440,23 +451,24 @@ export const useSessionStore = create<State>((set, get) => ({
   // ─── Permission response ───
 
   respondPermission: (tabId, questionId, optionId) => {
-    // Send to backend
-    window.clui.respondPermission(tabId, questionId, optionId).catch(() => {})
-
-    // Remove answered item from queue; show next tool's activity or clear
-    set((s) => ({
-      tabs: s.tabs.map((t) => {
-        if (t.id !== tabId) return t
-        const remaining = t.permissionQueue.filter((p) => p.questionId !== questionId)
-        return {
-          ...t,
-          permissionQueue: remaining,
-          currentActivity: remaining.length > 0
-            ? `Waiting for permission: ${remaining[0].toolTitle}`
-            : 'Working...',
-        }
-      }),
-    }))
+    window.clui.respondPermission(tabId, questionId, optionId)
+      .then((success: boolean) => {
+        if (!success) return
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId) return t
+            const remaining = t.permissionQueue.filter((p) => p.questionId !== questionId)
+            return {
+              ...t,
+              permissionQueue: remaining,
+              currentActivity: remaining.length > 0
+                ? `Waiting for permission: ${remaining[0].toolTitle}`
+                : 'Working...',
+            }
+          }),
+        }))
+      })
+      .catch(() => {})
   },
 
   // ─── Directory management ───
@@ -500,6 +512,7 @@ export const useSessionStore = create<State>((set, get) => ({
               hasChosenDirectory: true,
               claudeSessionId: null,
               additionalDirs: [],
+              tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
             }
           : t
       ),
@@ -548,10 +561,9 @@ export const useSessionStore = create<State>((set, get) => ({
     const resolvedPath = projectPath || (tab?.hasChosenDirectory ? tab.workingDirectory : (staticInfo?.homePath || tab?.workingDirectory || '~'))
     if (!tab) return
 
-    // Guard: don't send while connecting (warmup in progress)
-    if (tab.status === 'connecting') return
+    if (tab.status === 'connecting' && tab.currentActivity !== 'Interrupting...') return
 
-    const isBusy = tab.status === 'running'
+    const isBusy = tab.status === 'running' || (tab.status === 'connecting' && tab.currentActivity === 'Interrupting...')
     const requestId = crypto.randomUUID()
 
     // Build full prompt with attachment context
@@ -576,26 +588,17 @@ export const useSessionStore = create<State>((set, get) => ({
           ? t
           : {
               ...t,
-              // Once the user sends the first message, lock in the effective
-              // base directory (home by default) so the footer no longer shows "—".
               hasChosenDirectory: true,
               workingDirectory: resolvedPath,
             }
-        if (isBusy) {
-          return {
-            ...withEffectiveBase,
-            title,
-            attachments: [],
-            queuedPrompts: [...withEffectiveBase.queuedPrompts, prompt],
-          }
-        }
         return {
           ...withEffectiveBase,
-          status: 'connecting' as TabStatus,
+          status: isBusy ? ('connecting' as TabStatus) : ('connecting' as TabStatus),
           activeRequestId: requestId,
-          currentActivity: 'Starting...',
+          currentActivity: isBusy ? 'Interrupting...' : 'Starting...',
           title,
           attachments: [],
+          queuedPrompts: [],
           messages: [
             ...withEffectiveBase.messages,
             { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
@@ -604,18 +607,26 @@ export const useSessionStore = create<State>((set, get) => ({
       }),
     }))
 
-    // Send to backend — ControlPlane will queue if a run is active
     const { preferredModel } = get()
     const { effort, thinkingEnabled } = useThemeStore.getState()
-    window.clui.prompt(activeTabId, requestId, {
+    const effectiveEffort: EffortLevel = (effort === 'max' && !MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel)))
+      ? 'high'
+      : effort
+    const runOptions = {
       prompt: fullPrompt,
       projectPath: resolvedPath,
       sessionId: tab.claudeSessionId || undefined,
       model: preferredModel || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
-      effort: effort !== 'medium' ? (effort as EffortLevel) : undefined,
+      effort: effectiveEffort !== 'medium' ? effectiveEffort : undefined,
       thinking: thinkingEnabled ? 'adaptive' : 'disabled',
-    }).catch((err: Error) => {
+    }
+
+    const sendFn = isBusy
+      ? window.clui.interruptAndSend(activeTabId, requestId, runOptions)
+      : window.clui.prompt(activeTabId, requestId, runOptions)
+
+    sendFn.catch((err: Error) => {
       get().handleError(activeTabId, {
         message: err.message,
         stderrTail: [],
@@ -729,11 +740,15 @@ export const useSessionStore = create<State>((set, get) => ({
           }
 
           case 'task_update': {
-            // ── Text fallback ──
-            // text_chunk events (from stream_event deltas) are the primary render path.
-            // If they didn't arrive for this run (timing, partial stream, etc.), the
-            // assembled assistant event still has the full text — extract it here.
-            // "This run" = everything after the last user message.
+            if (event.message?.usage) {
+              const u = event.message.usage
+              updated.tokenUsage = {
+                input: (updated.tokenUsage?.input || 0) + (u.input_tokens || 0),
+                output: (updated.tokenUsage?.output || 0) + (u.output_tokens || 0),
+                cacheRead: (updated.tokenUsage?.cacheRead || 0) + (u.cache_read_input_tokens || 0),
+                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + (u.cache_creation_input_tokens || 0),
+              }
+            }
             if (event.message?.content) {
               const lastUserIdx = (() => {
                 for (let i = updated.messages.length - 1; i >= 0; i--) {
@@ -795,6 +810,14 @@ export const useSessionStore = create<State>((set, get) => ({
               numTurns: event.numTurns,
               usage: event.usage,
               sessionId: event.sessionId,
+            }
+            if (event.usage) {
+              updated.tokenUsage = {
+                input: (updated.tokenUsage?.input || 0) + (event.usage.input_tokens || 0),
+                output: (updated.tokenUsage?.output || 0) + (event.usage.output_tokens || 0),
+                cacheRead: (updated.tokenUsage?.cacheRead || 0) + (event.usage.cache_read_input_tokens || 0),
+                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + (event.usage.cache_creation_input_tokens || 0),
+              }
             }
             // ── Final text fallback ──
             // If neither text_chunks nor task_update text produced an assistant message,
@@ -907,7 +930,6 @@ export const useSessionStore = create<State>((set, get) => ({
           ? {
               ...t,
               status: newStatus as TabStatus,
-              // Clear activity when transitioning to idle (e.g., after warmup init)
               ...(newStatus === 'idle' ? { currentActivity: '', permissionQueue: [] as import('../../shared/types').PermissionRequest[], permissionDenied: null } : {}),
             }
           : t
@@ -946,3 +968,7 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 }))
+
+export function useActiveTab() {
+  return useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
+}

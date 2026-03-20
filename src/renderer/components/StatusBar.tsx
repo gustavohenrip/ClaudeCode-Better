@@ -1,8 +1,8 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
+import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database } from '@phosphor-icons/react'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
 
@@ -84,10 +84,10 @@ function ModelPicker() {
         <motion.div
           ref={popoverRef}
           data-clui-ui
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 4 }}
-          transition={{ duration: 0.12 }}
+          initial={{ opacity: 0, y: 6, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 4, scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
           className="rounded-xl"
           style={{
             position: 'fixed',
@@ -190,10 +190,10 @@ function PermissionModePicker() {
         <motion.div
           ref={popoverRef}
           data-clui-ui
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 4 }}
-          transition={{ duration: 0.12 }}
+          initial={{ opacity: 0, y: 6, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 4, scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
           className="rounded-xl"
           style={{
             position: 'fixed',
@@ -250,30 +250,58 @@ function PermissionModePicker() {
 
 /* ─── Effort Badge ─── */
 
-const EFFORT_CYCLE: EffortLevel[] = ['low', 'medium', 'high']
-
 function EffortBadge() {
   const effort = useThemeStore((s) => s.effort)
   const setEffort = useThemeStore((s) => s.setEffort)
+  const preferredModel = useSessionStore((s) => s.preferredModel)
+  const supportsMax = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
   const colors = useColors()
+  const [pop, setPop] = useState(false)
+  const prevEffort = useRef(effort)
+
+  useEffect(() => {
+    if (effort !== prevEffort.current) {
+      prevEffort.current = effort
+      setPop(true)
+      const t = setTimeout(() => setPop(false), 300)
+      return () => clearTimeout(t)
+    }
+  }, [effort])
+
+  const cycle: EffortLevel[] = supportsMax
+    ? ['low', 'medium', 'high', 'max']
+    : ['low', 'medium', 'high']
 
   const handleClick = () => {
-    const idx = EFFORT_CYCLE.indexOf(effort)
-    setEffort(EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length])
+    const idx = cycle.indexOf(effort)
+    const next = idx === -1 ? 0 : (idx + 1) % cycle.length
+    setEffort(cycle[next])
   }
 
+  const isMax = effort === 'max'
+  const isHighOrMax = effort === 'high' || isMax
+  const effortColor = effort === 'medium' ? colors.textTertiary : isMax ? '#FF6B35' : colors.accent
+
   return (
-    <button
+    <motion.button
       onClick={handleClick}
-      className="flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors"
+      className={`flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors ${pop ? 'animate-badge-pop' : ''}`}
       style={{ color: colors.textTertiary }}
       title={`Effort: ${effort} — click to cycle`}
+      whileTap={{ scale: 0.9 }}
     >
-      <Lightning size={10} weight={effort === 'high' ? 'fill' : 'regular'} style={{ color: effort !== 'medium' ? colors.accent : colors.textTertiary }} />
-      <span style={{ color: effort !== 'medium' ? colors.accent : colors.textTertiary }}>
+      {isMax ? (
+        <span className="relative flex items-center justify-center" style={{ width: 10, height: 10 }}>
+          <Lightning size={10} weight="fill" style={{ color: '#FF6B35', position: 'absolute', filter: 'drop-shadow(0 0 2px rgba(255, 107, 53, 0.6))' }} />
+          <Lightning size={7} weight="fill" style={{ color: '#FFD700', position: 'absolute', left: 4, top: 0 }} />
+        </span>
+      ) : (
+        <Lightning size={10} weight={isHighOrMax ? 'fill' : 'regular'} style={{ color: effortColor }} />
+      )}
+      <span style={{ color: effortColor, fontWeight: isMax ? 700 : undefined }}>
         {effort.charAt(0).toUpperCase() + effort.slice(1)}
       </span>
-    </button>
+    </motion.button>
   )
 }
 
@@ -283,17 +311,71 @@ function ThinkingBadge() {
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
   const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
   const colors = useColors()
+  const [pop, setPop] = useState(false)
+  const prevVal = useRef(thinkingEnabled)
+
+  useEffect(() => {
+    if (thinkingEnabled !== prevVal.current) {
+      prevVal.current = thinkingEnabled
+      setPop(true)
+      const t = setTimeout(() => setPop(false), 300)
+      return () => clearTimeout(t)
+    }
+  }, [thinkingEnabled])
 
   return (
-    <button
+    <motion.button
       onClick={() => setThinkingEnabled(!thinkingEnabled)}
-      className="flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors"
+      className={`flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors ${pop ? 'animate-badge-pop' : ''}`}
       style={{ color: thinkingEnabled ? colors.accent : colors.textTertiary }}
       title={thinkingEnabled ? 'Thinking enabled — click to disable' : 'Thinking disabled — click to enable'}
+      whileTap={{ scale: 0.9 }}
     >
       <Brain size={10} weight={thinkingEnabled ? 'fill' : 'regular'} />
       <span>Thinking</span>
-    </button>
+    </motion.button>
+  )
+}
+
+/* ─── Token Usage Badge ─── */
+
+function formatTokenCount(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+function TokenBadge() {
+  const tab = useActiveTab()
+  const colors = useColors()
+
+  const usage = tab?.tokenUsage
+  const input = usage?.input || 0
+  const output = usage?.output || 0
+  const totalTokens = input + output
+
+  if (totalTokens === 0) {
+    return (
+      <div
+        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5"
+        style={{ color: colors.textTertiary }}
+        title="Tokens used this session"
+      >
+        <Database size={10} weight="regular" />
+        <span>0 tokens</span>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5"
+      style={{ color: colors.textSecondary }}
+      title={`Input: ${formatTokenCount(input)} | Output: ${formatTokenCount(output)}\nCache read: ${formatTokenCount(usage?.cacheRead || 0)} | Cache write: ${formatTokenCount(usage?.cacheCreation || 0)}`}
+    >
+      <Database size={10} weight="regular" />
+      <span>{formatTokenCount(totalTokens)} tokens</span>
+    </div>
   )
 }
 
@@ -491,18 +573,24 @@ export function StatusBar() {
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 
         <ThinkingBadge />
+
+        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+
+        <TokenBadge />
       </div>
 
       {/* Right — Open in CLI */}
       <div className="flex items-center flex-shrink-0">
-        <button
+        <motion.button
           onClick={handleOpenInTerminal}
           className="flex items-center justify-center w-5 h-5 rounded-full transition-colors"
           style={{ color: colors.textTertiary }}
           title="Open in Terminal"
+          whileHover={{ scale: 1.15 }}
+          whileTap={{ scale: 0.9 }}
         >
           <Terminal size={12} />
-        </button>
+        </motion.button>
       </div>
     </div>
   )

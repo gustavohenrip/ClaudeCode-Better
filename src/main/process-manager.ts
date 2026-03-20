@@ -1,8 +1,8 @@
-import { spawn, execSync, ChildProcess } from 'child_process'
+import { spawn, execSync, execFile, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { appendFileSync } from 'fs'
-import { join } from 'path'
+import { appendFileSync, existsSync, accessSync, constants as fsConstants } from 'fs'
+import { join, dirname, delimiter } from 'path'
 import { StreamParser } from './stream-parser'
 import { getCliEnv } from './cli-env'
 import type { ClaudeEvent, RunOptions } from '../shared/types'
@@ -21,37 +21,52 @@ export interface RunHandle {
   parser: StreamParser
 }
 
-/**
- * Manages Claude Code subprocesses.
- */
 export class ProcessManager extends EventEmitter {
   private activeRuns = new Map<string, RunHandle>()
   private claudeBinary: string
 
   constructor() {
     super()
-    // Find the real claude binary — Electron doesn't inherit shell aliases or full PATH
     this.claudeBinary = this.findClaudeBinary()
     log(`Claude binary: ${this.claudeBinary}`)
   }
 
   private findClaudeBinary(): string {
-    // Try common locations
+    if (process.platform === 'win32') {
+      try {
+        const result = execSync('where.exe claude', { encoding: 'utf-8', timeout: 3000, env: getCliEnv() }).trim()
+        if (result) return result.split(/\r?\n/)[0].trim()
+      } catch {}
+
+      const home = homedir()
+      const appdata = process.env.APPDATA || ''
+      const winCandidates = [
+        join(appdata, 'npm', 'claude.cmd'),
+        join(home, '.npm-global', 'claude.cmd'),
+        join(appdata, 'npm', 'claude'),
+        join(home, '.npm-global', 'claude'),
+      ]
+      for (const c of winCandidates) {
+        try {
+          if (existsSync(c)) return c
+        } catch {}
+      }
+      return 'claude'
+    }
+
     const candidates = [
       '/usr/local/bin/claude',
       '/opt/homebrew/bin/claude',
       join(homedir(), '.npm-global/bin/claude'),
-      join(homedir(), '.nvm/versions/node', '**', 'bin/claude'),
     ]
 
     for (const c of candidates) {
       try {
-        execSync(`test -x "${c}"`, { stdio: 'ignore' })
+        accessSync(c, fsConstants.X_OK)
         return c
       } catch {}
     }
 
-    // Fallback: ask a login shell
     try {
       const result = execSync('/bin/zsh -ilc "whence -p claude"', { encoding: 'utf-8', env: getCliEnv() }).trim()
       if (result) return result
@@ -62,7 +77,6 @@ export class ProcessManager extends EventEmitter {
       if (result) return result
     } catch {}
 
-    // Last resort
     return 'claude'
   }
 
@@ -75,7 +89,7 @@ export class ProcessManager extends EventEmitter {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
-      '--permission-mode', 'acceptEdits',
+      '--permission-mode', options.cliPermissionMode || 'acceptEdits',
       '--chrome',
     ]
 
@@ -102,20 +116,18 @@ export class ProcessManager extends EventEmitter {
     log(`Starting run ${runId}: ${this.claudeBinary} ${args.join(' ')}`)
     log(`Prompt: ${options.prompt.substring(0, 200)}`)
 
-    // Build environment: merge login shell PATH with Electron's env
-    // Electron doesn't source ~/.zshrc so PATH is often incomplete
     const env = getCliEnv()
 
-    // Ensure our claude binary's directory is in PATH
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
+    const binDir = dirname(this.claudeBinary)
     if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
 
     const child = spawn(this.claudeBinary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env,
+      shell: process.platform === 'win32' && this.claudeBinary.endsWith('.cmd'),
     })
 
     log(`Spawned PID: ${child.pid}`)
@@ -142,16 +154,28 @@ export class ProcessManager extends EventEmitter {
       this.emit('parse-error', runId, line)
     })
 
+    let finalized = false
+    const finalize = (type: 'close' | 'error', codeOrErr: number | null | Error) => {
+      if (finalized) return
+      finalized = true
+      if (this.activeRuns.get(runId) === handle) {
+        this.activeRuns.delete(runId)
+      }
+      if (type === 'close') {
+        this.emit('exit', runId, codeOrErr as number | null, handle.sessionId)
+      } else {
+        this.emit('error', runId, codeOrErr as Error)
+      }
+    }
+
     child.on('close', (code) => {
       log(`Process closed [${runId}]: code=${code}`)
-      this.activeRuns.delete(runId)
-      this.emit('exit', runId, code, handle.sessionId)
+      finalize('close', code)
     })
 
     child.on('error', (err) => {
       log(`Process error [${runId}]: ${err.message}`)
-      this.activeRuns.delete(runId)
-      this.emit('error', runId, err)
+      finalize('error', err)
     })
 
     child.stderr?.setEncoding('utf-8')
@@ -160,10 +184,17 @@ export class ProcessManager extends EventEmitter {
       this.emit('stderr', runId, data)
     })
 
-    child.stdin!.write(options.prompt)
-    child.stdin!.end()
-
     this.activeRuns.set(runId, handle)
+
+    try {
+      child.stdin?.on('error', () => {})
+      child.stdin!.write(options.prompt)
+      child.stdin!.end()
+    } catch (stdinErr) {
+      log(`Stdin error [${runId}]: ${stdinErr}`)
+      try { child.kill() } catch {}
+    }
+
     return handle
   }
 
@@ -172,13 +203,32 @@ export class ProcessManager extends EventEmitter {
     if (!handle) return false
 
     log(`Cancelling run ${runId}`)
-    handle.process.kill('SIGINT')
+
+    try {
+      handle.process.kill('SIGINT')
+    } catch {}
 
     setTimeout(() => {
       if (handle.process.exitCode === null) {
-        handle.process.kill('SIGTERM')
+        try {
+          if (process.platform === 'win32' && handle.process.pid) {
+            try {
+              execFile('taskkill', ['/T', '/F', '/PID', String(handle.process.pid)], { timeout: 5000 }, () => {})
+            } catch {
+              handle.process.kill()
+            }
+          } else {
+            handle.process.kill('SIGTERM')
+          }
+        } catch {}
       }
     }, 5000)
+
+    setTimeout(() => {
+      if (handle.process.exitCode === null) {
+        try { handle.process.kill('SIGKILL') } catch {}
+      }
+    }, 10000)
 
     return true
   }

@@ -75,6 +75,7 @@ export function TabStrip() {
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.9 }}
+                  whileTap={{ scale: 0.95 }}
                   transition={{ duration: 0.15 }}
                   onClick={() => selectTab(tab.id)}
                   className="group flex items-center gap-1.5 cursor-pointer select-none flex-shrink-0 max-w-[160px] transition-all duration-150"
@@ -113,14 +114,17 @@ export function TabStrip() {
 
       {/* Pinned action buttons — always visible on the right */}
       <div className="flex items-center gap-0.5 flex-shrink-0 ml-1 pr-2">
-        <button
+        <motion.button
           onClick={() => createTab()}
           className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full transition-colors"
           style={{ color: colors.textTertiary }}
           title="New tab"
+          whileHover={{ scale: 1.1 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 20 }}
         >
           <Plus size={14} />
-        </button>
+        </motion.button>
 
         <HistoryPicker />
 

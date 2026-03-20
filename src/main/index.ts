@@ -1,5 +1,5 @@
-import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard } from 'electron'
+import { join, resolve } from 'path'
 import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
 import { createInterface } from 'readline'
 import { homedir } from 'os'
@@ -98,15 +98,16 @@ function createWindow(): void {
   const { width: screenWidth, height: screenHeight } = display.workAreaSize
   const { x: dx, y: dy } = display.workArea
 
+  const actualHeight = Math.min(PILL_HEIGHT, screenHeight - PILL_BOTTOM_MARGIN)
   const x = dx + Math.round((screenWidth - BAR_WIDTH) / 2)
-  const y = dy + screenHeight - PILL_HEIGHT - PILL_BOTTOM_MARGIN
+  const y = dy + screenHeight - actualHeight - PILL_BOTTOM_MARGIN
 
   mainWindow = new BrowserWindow({
     width: BAR_WIDTH,
-    height: PILL_HEIGHT,
+    height: actualHeight,
     x,
     y,
-    ...(process.platform === 'darwin' ? { type: 'panel' as const } : {}),  // NSPanel — non-activating, joins all spaces
+    ...(process.platform === 'darwin' ? { type: 'panel' as const, titleBarStyle: 'hidden' as const } : {}),
     frame: false,
     transparent: true,
     resizable: false,
@@ -114,10 +115,14 @@ function createWindow(): void {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
-    roundedCorners: true,
     backgroundColor: '#00000000',
     show: false,
-    icon: join(__dirname, '../../resources/icon.icns'),
+    title: '',
+    autoHideMenuBar: true,
+    roundedCorners: false,
+    icon: process.platform === 'win32'
+      ? join(__dirname, '../../resources/icon.png')
+      : join(__dirname, '../../resources/icon.icns'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -125,19 +130,26 @@ function createWindow(): void {
     },
   })
 
-  // Belt-and-suspenders: panel already joins all spaces and floats,
-  // but explicit flags ensure correct behavior on older Electron builds.
+  if (process.platform === 'win32') {
+    Menu.setApplicationMenu(null)
+    mainWindow.removeMenu()
+    mainWindow.setMenuBarVisibility(false)
+    mainWindow.setTitle('')
+    mainWindow.on('page-title-updated', (e) => e.preventDefault())
+  }
+
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow?.show()
-    // Enable OS-level click-through for transparent regions.
-    // { forward: true } ensures mousemove events still reach the renderer
-    // so it can toggle click-through off when cursor enters interactive UI.
+    showWindow('ready-to-show')
     mainWindow?.setIgnoreMouseEvents(true, { forward: true })
     if (process.env.ELECTRON_RENDERER_URL) {
-      mainWindow?.webContents.openDevTools({ mode: 'detach' })
+      mainWindow?.webContents.on('console-message', (_e, level, message) => {
+        if (level === 3 && (message.includes('Autofill.') || message.includes('is not valid JSON'))) {
+          _e.preventDefault()
+        }
+      })
     }
   })
 
@@ -166,11 +178,12 @@ function showWindow(source = 'unknown'): void {
   const display = screen.getDisplayNearestPoint(cursor)
   const { width: sw, height: sh } = display.workAreaSize
   const { x: dx, y: dy } = display.workArea
+  const actualH = Math.min(PILL_HEIGHT, sh - PILL_BOTTOM_MARGIN)
   mainWindow.setBounds({
     x: dx + Math.round((sw - BAR_WIDTH) / 2),
-    y: dy + sh - PILL_HEIGHT - PILL_BOTTOM_MARGIN,
+    y: dy + sh - actualH - PILL_BOTTOM_MARGIN,
     width: BAR_WIDTH,
-    height: PILL_HEIGHT,
+    height: actualH,
   })
 
   // Always re-assert space membership — the flag can be lost after hide/show cycles
@@ -185,6 +198,7 @@ function showWindow(source = 'unknown'): void {
   // As an accessory app (app.dock.hide), show() + focus gives keyboard
   // without deactivating the active app — hover preserved everywhere.
   mainWindow.show()
+  if (process.platform === 'win32') mainWindow.focus()
   mainWindow.webContents.focus()
   broadcast(IPC.WINDOW_SHOWN)
   if (SPACES_DEBUG) scheduleToggleSnapshots(toggleId, 'show')
@@ -314,6 +328,11 @@ ipcMain.handle(IPC.STOP_TAB, (_event, tabId: string) => {
   return controlPlane.cancelTab(tabId)
 })
 
+ipcMain.handle(IPC.INTERRUPT_AND_SEND, async (_event, { tabId, requestId, options }: { tabId: string; requestId: string; options: RunOptions }) => {
+  log(`IPC INTERRUPT_AND_SEND: tab=${tabId} req=${requestId}`)
+  return controlPlane.interruptAndSend(tabId, requestId, options)
+})
+
 ipcMain.handle(IPC.RETRY, async (_event, { tabId, requestId, options }: { tabId: string; requestId: string; options: RunOptions }) => {
   log(`IPC RETRY: tab=${tabId} req=${requestId}`)
   return controlPlane.retry(tabId, requestId, options)
@@ -354,7 +373,7 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
 
     let projectDirs: string[]
     if (projectPath) {
-      const encoded = projectPath.replace(/\//g, '-')
+      const encoded = projectPath.replace(/\\/g, '/').replace(/\//g, '-')
       projectDirs = existsSync(join(projectsRoot, encoded)) ? [encoded] : []
     } else {
       projectDirs = readdirSync(projectsRoot).filter((d: string) => {
@@ -432,14 +451,27 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
   const projectPath = typeof arg === 'string' ? undefined : arg.projectPath
   const projectDir = typeof arg === 'string' ? undefined : arg.projectDir
   log(`IPC LOAD_SESSION ${sessionId}`)
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (!UUID_RE.test(sessionId)) {
+    log(`LOAD_SESSION rejected: invalid sessionId format`)
+    return []
+  }
+
   try {
+    const projectsBase = resolve(homedir(), '.claude', 'projects')
     let filePath: string
     if (projectDir) {
-      filePath = join(homedir(), '.claude', 'projects', projectDir, `${sessionId}.jsonl`)
+      filePath = resolve(projectsBase, projectDir, `${sessionId}.jsonl`)
     } else {
       const cwd = projectPath || process.cwd()
-      const encodedPath = cwd.replace(/\//g, '-')
-      filePath = join(homedir(), '.claude', 'projects', encodedPath, `${sessionId}.jsonl`)
+      const encodedPath = cwd.replace(/\\/g, '/').replace(/\//g, '-')
+      filePath = resolve(projectsBase, encodedPath, `${sessionId}.jsonl`)
+    }
+    const sep = process.platform === 'win32' ? '\\' : '/'
+    if (!filePath.startsWith(projectsBase + sep)) {
+      log(`LOAD_SESSION rejected: path traversal detected`)
+      return []
     }
     if (!existsSync(filePath)) return []
 
@@ -577,6 +609,48 @@ ipcMain.handle(IPC.TAKE_SCREENSHOT, async () => {
   await new Promise((r) => setTimeout(r, 300))
 
   try {
+    if (process.platform === 'win32') {
+      const { execSync } = require('child_process')
+      const { join } = require('path')
+      const { tmpdir } = require('os')
+      const { writeFileSync } = require('fs')
+
+      const initialImage = clipboard.readImage()
+      const initialDataUrl = initialImage.isEmpty() ? '' : initialImage.toDataURL()
+
+      try {
+        execSync('start ms-screenclip:', { shell: true, timeout: 2000 })
+      } catch {
+        try {
+          execSync('start SnippingTool.exe', { shell: true, timeout: 2000 })
+        } catch {}
+      }
+
+      const deadline = Date.now() + 60000
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500))
+        const clip = clipboard.readImage()
+        if (!clip.isEmpty()) {
+          const newDataUrl = clip.toDataURL()
+          if (newDataUrl !== initialDataUrl) {
+            const buf = clip.toPNG()
+            const screenshotPath = join(tmpdir(), `clui-screenshot-${Date.now()}.png`)
+            writeFileSync(screenshotPath, buf)
+            return {
+              id: crypto.randomUUID(),
+              type: 'image',
+              name: `screenshot ${++screenshotCounter}.png`,
+              path: screenshotPath,
+              mimeType: 'image/png',
+              dataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+              size: buf.length,
+            }
+          }
+        }
+      }
+      return null
+    }
+
     const { execSync } = require('child_process')
     const { join } = require('path')
     const { tmpdir } = require('os')
@@ -594,7 +668,6 @@ ipcMain.handle(IPC.TAKE_SCREENSHOT, async () => {
       return null
     }
 
-    // Return structured attachment with data URL preview
     const buf = readFileSync(screenshotPath)
     return {
       id: crypto.randomUUID(),
@@ -622,18 +695,23 @@ ipcMain.handle(IPC.TAKE_SCREENSHOT, async () => {
 })
 
 let pasteCounter = 0
+const MAX_PASTE_IMAGE_BYTES = 50 * 1024 * 1024
+const MAX_AUDIO_BYTES = 100 * 1024 * 1024
+
 ipcMain.handle(IPC.PASTE_IMAGE, async (_event, dataUrl: string) => {
   try {
     const { writeFileSync } = require('fs')
     const { join } = require('path')
     const { tmpdir } = require('os')
 
-    // Parse data URL: "data:image/png;base64,..."
+    if (typeof dataUrl !== 'string' || dataUrl.length > MAX_PASTE_IMAGE_BYTES * 1.37) return null
+
     const match = dataUrl.match(/^data:(image\/(\w+));base64,(.+)$/)
     if (!match) return null
 
     const [, mimeType, ext, base64Data] = match
     const buf = Buffer.from(base64Data, 'base64')
+    if (buf.length > MAX_PASTE_IMAGE_BYTES) return null
     const timestamp = Date.now()
     const filePath = join(tmpdir(), `clui-paste-${timestamp}.${ext}`)
     writeFileSync(filePath, buf)
@@ -660,11 +738,21 @@ ipcMain.handle(IPC.TRANSCRIBE_AUDIO, async (_event, audioBase64: string) => {
 
   const tmpWav = join(tmpdir(), `clui-voice-${Date.now()}.wav`)
   try {
+    if (typeof audioBase64 !== 'string' || audioBase64.length > MAX_AUDIO_BYTES * 1.37) {
+      return { error: 'Audio payload too large' }
+    }
     const buf = Buffer.from(audioBase64, 'base64')
+    if (buf.length > MAX_AUDIO_BYTES) {
+      return { error: 'Audio payload too large' }
+    }
     writeFileSync(tmpWav, buf)
 
-    // Find whisper-cli (whisper-cpp homebrew) or whisper (python)
-    const candidates = [
+    const candidates = process.platform === 'win32' ? [
+      join(homedir(), 'AppData', 'Local', 'Programs', 'whisper-cli', 'whisper-cli.exe'),
+      join(homedir(), 'AppData', 'Roaming', 'Python', 'Scripts', 'whisper.exe'),
+      join(homedir(), '.local', 'bin', 'whisper-cli.exe'),
+      join(homedir(), '.local', 'bin', 'whisper.exe'),
+    ] : [
       '/opt/homebrew/bin/whisper-cli',
       '/usr/local/bin/whisper-cli',
       '/opt/homebrew/bin/whisper',
@@ -678,32 +766,50 @@ ipcMain.handle(IPC.TRANSCRIBE_AUDIO, async (_event, audioBase64: string) => {
     }
 
     if (!whisperBin) {
-      try {
-        whisperBin = execSync('/bin/zsh -lc "whence -p whisper-cli"', { encoding: 'utf-8' }).trim()
-      } catch {}
-    }
-    if (!whisperBin) {
-      try {
-        whisperBin = execSync('/bin/zsh -lc "whence -p whisper"', { encoding: 'utf-8' }).trim()
-      } catch {}
+      if (process.platform === 'win32') {
+        try {
+          whisperBin = execSync('where.exe whisper-cli', { encoding: 'utf-8' }).trim().split(/\r?\n/)[0]
+        } catch {}
+        if (!whisperBin) {
+          try {
+            whisperBin = execSync('where.exe whisper', { encoding: 'utf-8' }).trim().split(/\r?\n/)[0]
+          } catch {}
+        }
+      } else {
+        try {
+          whisperBin = execSync('/bin/zsh -lc "whence -p whisper-cli"', { encoding: 'utf-8' }).trim()
+        } catch {}
+        if (!whisperBin) {
+          try {
+            whisperBin = execSync('/bin/zsh -lc "whence -p whisper"', { encoding: 'utf-8' }).trim()
+          } catch {}
+        }
+      }
     }
 
     if (!whisperBin) {
       return {
-        error: 'Whisper not found. Install with: brew install whisper-cli',
+        error: process.platform === 'win32'
+          ? 'Whisper not found. Install whisper-cli and ensure it is in your PATH.'
+          : 'Whisper not found. Install with: brew install whisper-cli',
         transcript: null,
       }
     }
 
     const isWhisperCpp = whisperBin.includes('whisper-cli')
 
-    // Find model file — prefer multilingual (auto-detect language) over .en (English-only)
-    const modelCandidates = [
+    const modelCandidates = process.platform === 'win32' ? [
+      join(homedir(), 'AppData', 'Local', 'whisper', 'ggml-base.bin'),
+      join(homedir(), 'AppData', 'Local', 'whisper', 'ggml-tiny.bin'),
+      join(homedir(), '.local', 'share', 'whisper', 'ggml-base.bin'),
+      join(homedir(), '.local', 'share', 'whisper', 'ggml-tiny.bin'),
+      join(homedir(), 'AppData', 'Local', 'whisper', 'ggml-base.en.bin'),
+      join(homedir(), 'AppData', 'Local', 'whisper', 'ggml-tiny.en.bin'),
+    ] : [
       join(homedir(), '.local/share/whisper/ggml-base.bin'),
       join(homedir(), '.local/share/whisper/ggml-tiny.bin'),
       '/opt/homebrew/share/whisper-cpp/models/ggml-base.bin',
       '/opt/homebrew/share/whisper-cpp/models/ggml-tiny.bin',
-      // Fall back to English-only models if multilingual not available
       join(homedir(), '.local/share/whisper/ggml-base.en.bin'),
       join(homedir(), '.local/share/whisper/ggml-tiny.en.bin'),
       '/opt/homebrew/share/whisper-cpp/models/ggml-base.en.bin',
@@ -724,7 +830,9 @@ ipcMain.handle(IPC.TRANSCRIBE_AUDIO, async (_event, audioBase64: string) => {
       // whisper-cpp: whisper-cli -m model -f file --no-timestamps
       if (!modelPath) {
         return {
-          error: 'Whisper model not found. Download with:\nmkdir -p ~/.local/share/whisper && curl -L -o ~/.local/share/whisper/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
+          error: process.platform === 'win32'
+            ? 'Whisper model not found. Download ggml-tiny.bin from huggingface.co/ggerganov/whisper.cpp and place it in %LOCALAPPDATA%\\whisper\\'
+            : 'Whisper model not found. Download with:\nmkdir -p ~/.local/share/whisper && curl -L -o ~/.local/share/whisper/ggml-tiny.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin',
           transcript: null,
         }
       }
@@ -807,7 +915,6 @@ ipcMain.handle(IPC.OPEN_IN_TERMINAL, (_event, arg: string | null | { sessionId?:
   const { execFile } = require('child_process')
   const claudeBin = 'claude'
 
-  // Support both old (string) and new ({ sessionId, projectPath }) calling convention
   let sessionId: string | null = null
   let projectPath: string = process.cwd()
   if (typeof arg === 'string') {
@@ -817,7 +924,44 @@ ipcMain.handle(IPC.OPEN_IN_TERMINAL, (_event, arg: string | null | { sessionId?:
     projectPath = arg.projectPath && arg.projectPath !== '~' ? arg.projectPath : process.cwd()
   }
 
-  // Escape for AppleScript: double quotes → backslash-escaped, backslashes doubled
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (sessionId && !UUID_RE.test(sessionId)) {
+    log(`OPEN_IN_TERMINAL rejected: invalid sessionId format`)
+    return false
+  }
+
+  if (process.platform === 'win32') {
+    const claudeCmd = sessionId ? `${claudeBin} --resume ${sessionId}` : claudeBin
+    const { execSync: winExecSync } = require('child_process')
+
+    let useWt = false
+    try {
+      winExecSync('where.exe wt.exe', { stdio: 'ignore', timeout: 2000 })
+      useWt = true
+    } catch {}
+
+    try {
+      if (useWt) {
+        const wtArgs = ['-d', projectPath, 'cmd.exe', '/k', claudeCmd]
+        execFile('wt.exe', wtArgs, (err: Error | null) => {
+          if (err) log(`Failed to open Windows Terminal: ${err.message}`)
+          else log(`Opened Windows Terminal with: ${claudeCmd}`)
+        })
+      } else {
+        const safeDir = projectPath.replace(/"/g, '')
+        const cmdArgs = ['/c', 'start', '', 'cmd.exe', '/k', `cd /d "${safeDir}" && ${claudeCmd}`]
+        execFile('cmd.exe', cmdArgs, (err: Error | null) => {
+          if (err) log(`Failed to open cmd: ${err.message}`)
+          else log(`Opened cmd with: ${claudeCmd}`)
+        })
+      }
+      return true
+    } catch (err: unknown) {
+      log(`Failed to open terminal: ${err}`)
+      return false
+    }
+  }
+
   const projectDir = projectPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
   let cmd: string
   if (sessionId) {
@@ -946,6 +1090,11 @@ app.whenReady().then(async () => {
     })
   }
 
+  screen.on('display-metrics-changed', () => {
+    if (mainWindow?.isVisible()) {
+      showWindow('display-metrics-changed')
+    }
+  })
 
   // Primary: Option+Space (2 keys, doesn't conflict with shell)
   // Fallback: Cmd+Shift+K kept as secondary shortcut
@@ -955,9 +1104,21 @@ app.whenReady().then(async () => {
   }
   globalShortcut.register('CommandOrControl+Shift+K', () => toggleWindow('shortcut Cmd/Ctrl+Shift+K'))
 
-  const trayIconPath = join(__dirname, '../../resources/trayTemplate.png')
+  if (process.env.ELECTRON_RENDERER_URL) {
+    globalShortcut.register('F12', () => {
+      if (mainWindow?.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools()
+      } else {
+        mainWindow?.webContents.openDevTools({ mode: 'detach' })
+      }
+    })
+  }
+
+  const trayIconPath = process.platform === 'win32'
+    ? join(__dirname, '../../resources/icon.png')
+    : join(__dirname, '../../resources/trayTemplate.png')
   const trayIcon = nativeImage.createFromPath(trayIconPath)
-  trayIcon.setTemplateImage(true)
+  if (process.platform === 'darwin') trayIcon.setTemplateImage(true)
   tray = new Tray(trayIcon)
   tray.setToolTip('Clui CC — Claude Code UI')
   tray.on('click', () => toggleWindow('tray click'))

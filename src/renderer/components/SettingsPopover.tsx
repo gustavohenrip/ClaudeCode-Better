@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning } from '@phosphor-icons/react'
 import { useThemeStore, type EffortLevel } from '../theme'
-import { useSessionStore } from '../stores/sessionStore'
+import { useSessionStore, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
 
@@ -59,6 +59,8 @@ function SegmentedControl({
     >
       {options.map((opt) => {
         const active = opt.value === value
+        const isMax = opt.value === 'max'
+        const activeBg = isMax ? 'linear-gradient(135deg, #FF6B35, #FF8C42)' : colors.accent
         return (
           <button
             key={opt.value}
@@ -66,8 +68,9 @@ function SegmentedControl({
             onClick={() => onChange(opt.value)}
             className="flex-1 text-[11px] font-medium py-0.5 rounded-md transition-colors"
             style={{
-              background: active ? colors.accent : 'transparent',
-              color: active ? colors.textOnAccent : colors.textTertiary,
+              background: active ? activeBg : 'transparent',
+              color: active ? (isMax ? '#fff' : colors.textOnAccent) : (isMax ? '#FF6B35' : colors.textTertiary),
+              fontWeight: isMax ? 700 : undefined,
             }}
           >
             {opt.label}
@@ -92,6 +95,8 @@ export function SettingsPopover() {
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
   const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
   const isExpanded = useSessionStore((s) => s.isExpanded)
+  const preferredModel = useSessionStore((s) => s.preferredModel)
+  const supportsMaxEffort = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
@@ -146,19 +151,25 @@ export function SettingsPopover() {
     return () => window.removeEventListener('resize', onResize)
   }, [open, updatePos])
 
-  // Keep panel tracking the trigger continuously while open so it follows
-  // width/position animations of the top bar without feeling "stuck in space."
   useEffect(() => {
-    if (!open) return
+    if (!open || !triggerRef.current) return
     let raf = 0
-    const tick = () => {
-      updatePos()
-      raf = requestAnimationFrame(tick)
+    let lastRight = -1
+    let lastAnchor = -1
+    const check = () => {
+      if (!triggerRef.current) return
+      const rect = triggerRef.current.getBoundingClientRect()
+      const r = window.innerWidth - rect.right
+      const a = isExpanded ? rect.bottom : rect.top
+      if (r !== lastRight || a !== lastAnchor) {
+        lastRight = r
+        lastAnchor = a
+        updatePos()
+      }
+      raf = requestAnimationFrame(check)
     }
-    raf = requestAnimationFrame(tick)
-    return () => {
-      if (raf) cancelAnimationFrame(raf)
-    }
+    raf = requestAnimationFrame(check)
+    return () => { if (raf) cancelAnimationFrame(raf) }
   }, [open, expandedUI, isExpanded, updatePos])
 
   const handleToggle = () => {
@@ -182,10 +193,10 @@ export function SettingsPopover() {
         <motion.div
           ref={popoverRef}
           data-clui-ui
-          initial={{ opacity: 0, y: isExpanded ? -4 : 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: isExpanded ? -4 : 4 }}
-          transition={{ duration: 0.12 }}
+          initial={{ opacity: 0, y: isExpanded ? -6 : 6, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: isExpanded ? -4 : 4, scale: 0.97 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
           className="rounded-xl"
           style={{
             position: 'fixed',
@@ -274,12 +285,13 @@ export function SettingsPopover() {
                 </div>
               </div>
               <SegmentedControl
-                value={effort}
+                value={effort === 'max' && !supportsMaxEffort ? 'high' : effort}
                 onChange={(v) => setEffort(v as EffortLevel)}
                 options={[
                   { value: 'low', label: 'Low' },
                   { value: 'medium', label: 'Medium' },
                   { value: 'high', label: 'High' },
+                  ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
                 ]}
                 colors={colors}
               />

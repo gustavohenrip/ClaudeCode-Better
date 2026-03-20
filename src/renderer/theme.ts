@@ -272,7 +272,7 @@ export type ColorPalette = { [K in keyof typeof darkColors]: string }
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 
-export type EffortLevel = 'low' | 'medium' | 'high'
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 
 interface ThemeState {
   isDark: boolean
@@ -320,10 +320,10 @@ function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expanded
     if (raw) {
       const parsed = JSON.parse(raw)
       return {
-        themeMode: ['light', 'dark'].includes(parsed.themeMode) ? parsed.themeMode : 'dark',
+        themeMode: ['light', 'dark', 'system'].includes(parsed.themeMode) ? parsed.themeMode : 'dark',
         soundEnabled: typeof parsed.soundEnabled === 'boolean' ? parsed.soundEnabled : true,
         expandedUI: typeof parsed.expandedUI === 'boolean' ? parsed.expandedUI : false,
-        effort: (['low', 'medium', 'high'] as EffortLevel[]).includes(parsed.effort) ? parsed.effort : 'medium',
+        effort: (['low', 'medium', 'high', 'max'] as EffortLevel[]).includes(parsed.effort) ? parsed.effort : 'medium',
         thinkingEnabled: typeof parsed.thinkingEnabled === 'boolean' ? parsed.thinkingEnabled : true,
       }
     }
@@ -335,16 +335,16 @@ function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expanded
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch {}
 }
 
-const saved = { ...loadSettings(), expandedUI: false }
+const saved = loadSettings()
 
 export const useThemeStore = create<ThemeState>((set, get) => ({
-  isDark: saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : true,
+  isDark: saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true),
   themeMode: saved.themeMode,
   soundEnabled: saved.soundEnabled,
   expandedUI: saved.expandedUI,
   effort: saved.effort,
   thinkingEnabled: saved.thinkingEnabled,
-  _systemIsDark: true,
+  _systemIsDark: typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true,
   setIsDark: (isDark) => {
     set({ isDark })
     applyTheme(isDark)
@@ -377,17 +377,20 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled })
   },
   setSystemTheme: (isDark) => {
-    set({ _systemIsDark: isDark })
-    // Only apply if following system
-    if (get().themeMode === 'system') {
-      set({ isDark })
+    const s = get()
+    if (s._systemIsDark === isDark) return
+    if (s.themeMode === 'system') {
+      set({ _systemIsDark: isDark, isDark })
       applyTheme(isDark)
+    } else {
+      set({ _systemIsDark: isDark })
     }
   },
 }))
 
 // Initialize CSS vars with saved theme
-syncTokensToCss(saved.themeMode === 'light' ? lightColors : darkColors)
+const initialIsDark = saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true)
+syncTokensToCss(initialIsDark ? darkColors : lightColors)
 
 /** Reactive hook — returns the active color palette */
 export function useColors(): ColorPalette {

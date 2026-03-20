@@ -7,19 +7,17 @@ import {
   Robot, Question, Wrench, FolderOpen, Copy, Check, CaretRight, CaretDown,
   SpinnerGap, ArrowCounterClockwise, Square, Brain,
 } from '@phosphor-icons/react'
-import { useSessionStore } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab } from '../stores/sessionStore'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
 import { useColors, useThemeStore } from '../theme'
 import type { Message } from '../../shared/types'
 
-// ─── Constants ───
 
 const INITIAL_RENDER_CAP = 100
 const PAGE_SIZE = 100
-const REMARK_PLUGINS = [remarkGfm] // Hoisted — prevents re-parse on every render
+const REMARK_PLUGINS = [remarkGfm]
 
-// ─── Types ───
 
 type GroupedItem =
   | { kind: 'user'; message: Message }
@@ -28,7 +26,6 @@ type GroupedItem =
   | { kind: 'tool-group'; messages: Message[] }
   | { kind: 'thinking'; message: Message }
 
-// ─── Helpers ───
 
 function groupMessages(messages: Message[]): GroupedItem[] {
   const result: GroupedItem[] = []
@@ -56,25 +53,20 @@ function groupMessages(messages: Message[]): GroupedItem[] {
   return result
 }
 
-// ─── Main Component ───
 
 export function ConversationView() {
-  const tabs = useSessionStore((s) => s.tabs)
+  const tab = useActiveTab()
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const sendMessage = useSessionStore((s) => s.sendMessage)
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const [hovered, setHovered] = useState(false)
-  const [renderOffset, setRenderOffset] = useState(0) // 0 = show from tail
+  const [renderOffset, setRenderOffset] = useState(0)
   const isNearBottomRef = useRef(true)
   const prevTabIdRef = useRef(activeTabId)
   const colors = useColors()
   const expandedUI = useThemeStore((s) => s.expandedUI)
 
-  const tab = tabs.find((t) => t.id === activeTabId)
-
-  // Reset render offset and scroll state when switching tabs
   useEffect(() => {
     if (activeTabId !== prevTabIdRef.current) {
       prevTabIdRef.current = activeTabId
@@ -129,7 +121,19 @@ export function ConversationView() {
   const showInterrupt = isRunning && tab.messages.some((m) => m.role === 'user')
 
   if (tab.messages.length === 0) {
-    return <EmptyState />
+    return (
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={`empty-${activeTabId}`}
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.2, ease: [0.4, 0, 0.1, 1] }}
+        >
+          <EmptyState />
+        </motion.div>
+      </AnimatePresence>
+    )
   }
 
   // Messages from before initial render cap are "historical" — no motion
@@ -145,17 +149,21 @@ export function ConversationView() {
   return (
     <div
       data-clui-ui
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
-      {/* Scrollable messages area */}
+      <AnimatePresence mode="wait">
+      <motion.div
+        key={activeTabId}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.15, ease: 'easeOut' }}
+      >
       <div
         ref={scrollRef}
         className="overflow-y-auto overflow-x-hidden px-4 pt-2 conversation-selectable"
         style={{ maxHeight: expandedUI ? 460 : 336, paddingBottom: 28 }}
         onScroll={handleScroll}
       >
-        {/* Load older button */}
         {hasOlder && (
           <div className="flex justify-center py-2">
             <button
@@ -190,7 +198,6 @@ export function ConversationView() {
           })}
         </div>
 
-        {/* Permission card (shows first item from queue) */}
         <AnimatePresence>
           {tab.permissionQueue.length > 0 && (
             <PermissionCard
@@ -201,7 +208,6 @@ export function ConversationView() {
           )}
         </AnimatePresence>
 
-        {/* Permission denied fallback card */}
         <AnimatePresence>
           {tab.permissionDenied && (
             <PermissionDeniedCard
@@ -219,7 +225,6 @@ export function ConversationView() {
           )}
         </AnimatePresence>
 
-        {/* Queued prompts */}
         <AnimatePresence>
           {tab.queuedPrompts.map((prompt, i) => (
             <QueuedMessage key={`queued-${i}`} content={prompt} />
@@ -228,8 +233,9 @@ export function ConversationView() {
 
         <div ref={bottomRef} />
       </div>
+      </motion.div>
+      </AnimatePresence>
 
-      {/* Activity row — overlaps bottom of scroll area as a fade strip */}
       <div
         className="flex items-center justify-between px-4 relative"
         style={{
@@ -240,7 +246,6 @@ export function ConversationView() {
           zIndex: 2,
         }}
       >
-        {/* Left: status indicator */}
         <div className="flex items-center gap-1.5 text-[11px] min-w-0">
           {isRunning && (
             <span className="flex items-center gap-1.5">
@@ -272,7 +277,6 @@ export function ConversationView() {
           )}
         </div>
 
-        {/* Right: interrupt button when running */}
         <div className="flex items-center flex-shrink-0">
           <AnimatePresence>
             {showInterrupt && (
@@ -285,7 +289,6 @@ export function ConversationView() {
   )
 }
 
-// ─── Empty State (directory picker before first message) ───
 
 function EmptyState() {
   const setBaseDirectory = useSessionStore((s) => s.setBaseDirectory)
@@ -323,17 +326,22 @@ function EmptyState() {
   )
 }
 
-// ─── Copy Button ───
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const colors = useColors()
+
+  useEffect(() => {
+    return () => { if (timerRef.current) clearTimeout(timerRef.current) }
+  }, [])
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      if (timerRef.current) clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => setCopied(false), 1500)
     } catch {}
   }
 
@@ -358,7 +366,6 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-// ─── Interrupt Button ───
 
 function InterruptButton({ tabId }: { tabId: string }) {
   const colors = useColors()
@@ -390,7 +397,6 @@ function InterruptButton({ tabId }: { tabId: string }) {
   )
 }
 
-// ─── User Message ───
 
 function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
   const colors = useColors()
@@ -414,9 +420,9 @@ function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: b
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15 }}
+      initial={{ opacity: 0, y: 8, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
       className="flex justify-end py-1.5"
     >
       {content}
@@ -424,17 +430,15 @@ function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: b
   )
 }
 
-// ─── Queued Message (waiting at bottom until processed) ───
-
 function QueuedMessage({ content }: { content: string }) {
   const colors = useColors()
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      transition={{ duration: 0.15 }}
+      initial={{ opacity: 0, y: 8, scale: 0.95 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.93 }}
+      transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
       className="flex justify-end py-1.5"
     >
       <div
@@ -453,7 +457,6 @@ function QueuedMessage({ content }: { content: string }) {
   )
 }
 
-// ─── Table scroll wrapper — fade edges when horizontally scrollable ───
 
 function TableScrollWrapper({ children }: { children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -511,7 +514,6 @@ function TableScrollWrapper({ children }: { children: React.ReactNode }) {
   )
 }
 
-// ─── Image card — graceful fallback when src returns 404 ───
 
 function ImageCard({ src, alt, colors }: { src?: string; alt?: string; colors: ReturnType<typeof useColors> }) {
   const [failed, setFailed] = useState(false)
@@ -559,7 +561,6 @@ function ImageCard({ src, alt, colors }: { src?: string; alt?: string; colors: R
   )
 }
 
-// ─── Assistant Message (memoized — only re-renders when content changes) ───
 
 const AssistantMessage = React.memo(function AssistantMessage({
   message,
@@ -594,8 +595,6 @@ const AssistantMessage = React.memo(function AssistantMessage({
           {message.content}
         </Markdown>
       </div>
-      {/* Copy button — always in DOM, shown via CSS :hover (no React state needed).
-          Absolute positioning so it never shifts the text layout. */}
       {message.content.trim() && (
         <div className="absolute bottom-0 right-0 opacity-0 group-hover/msg:opacity-100 transition-opacity duration-100">
           <CopyButton text={message.content} />
@@ -610,9 +609,9 @@ const AssistantMessage = React.memo(function AssistantMessage({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15 }}
+      initial={{ opacity: 0, y: 8, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
       className="py-1"
     >
       {inner}
@@ -620,9 +619,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
   )
 }, (prev, next) => prev.message.content === next.message.content && prev.skipMotion === next.skipMotion)
 
-// ─── Tool Group (collapsible timeline — Claude Code style) ───
 
-/** Build a short description from tool name + input for the collapsed summary */
 function toolSummary(tools: Message[]): string {
   if (tools.length === 0) return ''
   // Use first tool's context for summary
@@ -672,7 +669,6 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
   if (isOpen) {
     const inner = (
       <div className="py-1">
-        {/* Collapse header — click to close */}
         {!hasRunning && (
           <div
             className="flex items-center gap-1 cursor-pointer mb-1.5"
@@ -685,9 +681,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
           </div>
         )}
 
-        {/* Timeline */}
         <div className="relative pl-6">
-          {/* Vertical line */}
           <div
             className="absolute left-[10px] top-1 bottom-1 w-px"
             style={{ background: colors.timelineLine }}
@@ -701,7 +695,6 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 
               return (
                 <div key={tool.id} className="relative">
-                  {/* Timeline node */}
                   <div
                     className="absolute -left-6 top-[1px] w-[20px] h-[20px] rounded-full flex items-center justify-center"
                     style={{
@@ -715,7 +708,6 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
                     }
                   </div>
 
-                  {/* Tool description */}
                   <div className="min-w-0">
                     <span
                       className="text-[12px] leading-[1.4] block truncate"
@@ -724,7 +716,6 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
                       {desc}
                     </span>
 
-                    {/* Result badge */}
                     {!isRunning && (
                       <span
                         className="inline-block text-[10px] mt-0.5 px-1.5 py-[1px] rounded"
@@ -758,7 +749,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
         initial={{ opacity: 0, height: 0 }}
         animate={{ opacity: 1, height: 'auto' }}
         exit={{ opacity: 0, height: 0 }}
-        transition={{ duration: 0.15 }}
+        transition={{ type: 'spring', stiffness: 350, damping: 28, mass: 0.7, opacity: { duration: 0.15 } }}
       >
         {inner}
       </motion.div>
@@ -784,9 +775,9 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 4 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.12 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.5 }}
       className="py-0.5"
     >
       {inner}
@@ -840,17 +831,15 @@ function ThinkingMessage({ message, skipMotion }: { message: Message; skipMotion
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.12 }}
+      initial={{ opacity: 0, y: 6, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
       className="py-1"
     >
       {inner}
     </motion.div>
   )
 }
-
-// ─── System Message ───
 
 function SystemMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
   const isError = message.content.startsWith('Error:') || message.content.includes('unexpectedly')
@@ -872,9 +861,9 @@ function SystemMessage({ message, skipMotion }: { message: Message; skipMotion?:
 
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.15 }}
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.5 }}
       className="py-0.5"
     >
       {inner}
@@ -882,7 +871,6 @@ function SystemMessage({ message, skipMotion }: { message: Message; skipMotion?:
   )
 }
 
-// ─── Tool Icon mapping ───
 
 function ToolIcon({ name, size = 12 }: { name: string; size?: number }) {
   const colors = useColors()

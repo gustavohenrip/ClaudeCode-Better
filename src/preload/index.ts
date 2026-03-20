@@ -9,6 +9,7 @@ export interface CluiAPI {
   prompt(tabId: string, requestId: string, options: RunOptions): Promise<void>
   cancel(requestId: string): Promise<boolean>
   stopTab(tabId: string): Promise<boolean>
+  interruptAndSend(tabId: string, requestId: string, options: RunOptions): Promise<void>
   retry(tabId: string, requestId: string, options: RunOptions): Promise<void>
   status(): Promise<HealthReport>
   tabHealth(): Promise<HealthReport>
@@ -58,6 +59,7 @@ const api: CluiAPI = {
   prompt: (tabId, requestId, options) => ipcRenderer.invoke(IPC.PROMPT, { tabId, requestId, options }),
   cancel: (requestId) => ipcRenderer.invoke(IPC.CANCEL, requestId),
   stopTab: (tabId) => ipcRenderer.invoke(IPC.STOP_TAB, tabId),
+  interruptAndSend: (tabId, requestId, options) => ipcRenderer.invoke(IPC.INTERRUPT_AND_SEND, { tabId, requestId, options }),
   retry: (tabId, requestId, options) => ipcRenderer.invoke(IPC.RETRY, { tabId, requestId, options }),
   status: () => ipcRenderer.invoke(IPC.STATUS),
   tabHealth: () => ipcRenderer.invoke(IPC.TAB_HEALTH),

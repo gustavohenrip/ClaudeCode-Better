@@ -1,17 +1,18 @@
-import React, { useEffect, useCallback } from 'react'
+import React, { useEffect, useCallback, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Paperclip, Camera, HeadCircuit } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
 import { ConversationView } from './components/ConversationView'
 import { InputBar } from './components/InputBar'
 import { StatusBar } from './components/StatusBar'
-import { MarketplacePanel } from './components/MarketplacePanel'
+const MarketplacePanel = lazy(() => import('./components/MarketplacePanel').then((m) => ({ default: m.MarketplacePanel })))
 import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore } from './stores/sessionStore'
 import { useColors, useThemeStore, spacing } from './theme'
 
+const SPRING = { type: 'spring' as const, stiffness: 280, damping: 24, mass: 0.8 }
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
 
 export default function App() {
@@ -23,15 +24,19 @@ export default function App() {
   const colors = useColors()
   const setSystemTheme = useThemeStore((s) => s.setSystemTheme)
   const expandedUI = useThemeStore((s) => s.expandedUI)
+  const [windowVisible, setWindowVisible] = useState(false)
 
-  // ─── Theme initialization ───
   useEffect(() => {
-    // Get initial OS theme — setSystemTheme respects themeMode (system/light/dark)
+    const unsub = window.clui.onWindowShown(() => setWindowVisible(true))
+    requestAnimationFrame(() => setWindowVisible(true))
+    return unsub
+  }, [])
+
+  useEffect(() => {
     window.clui.getTheme().then(({ isDark }) => {
       setSystemTheme(isDark)
     }).catch(() => {})
 
-    // Listen for OS theme changes
     const unsub = window.clui.onThemeChange((isDark) => {
       setSystemTheme(isDark)
     })
@@ -47,7 +52,6 @@ export default function App() {
       const homeDir = useSessionStore.getState().staticInfo?.homePath || '~'
       const tab = useSessionStore.getState().tabs[0]
       if (tab) {
-        // Set working directory to home by default (user hasn't chosen yet)
         useSessionStore.setState((s) => ({
           tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, workingDirectory: homeDir, hasChosenDirectory: false } : t)),
         }))
@@ -61,7 +65,6 @@ export default function App() {
     })
   }, [])
 
-  // OS-level click-through (RAF-throttled to avoid per-pixel IPC)
   useEffect(() => {
     if (!window.clui?.setIgnoreMouseEvents) return
     let lastIgnored: boolean | null = null
@@ -99,7 +102,6 @@ export default function App() {
   const marketplaceOpen = useSessionStore((s) => s.marketplaceOpen)
   const isRunning = activeTabStatus === 'running' || activeTabStatus === 'connecting'
 
-  // Layout dimensions — expandedUI widens and heightens the panel
   const contentWidth = expandedUI ? 700 : spacing.contentWidth
   const cardExpandedWidth = expandedUI ? 700 : 460
   const cardCollapsedWidth = expandedUI ? 670 : 430
@@ -120,9 +122,14 @@ export default function App() {
 
   return (
     <PopoverLayerProvider>
-      <div className="flex flex-col justify-end h-full" style={{ background: 'transparent' }}>
+      <motion.div
+        className="flex flex-col justify-end h-full"
+        style={{ background: 'transparent' }}
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={windowVisible ? { opacity: 1, scale: 1 } : { opacity: 0, scale: 0.95 }}
+        transition={SPRING}
+      >
 
-        {/* ─── 460px content column, centered. Circles overflow left. ─── */}
         <div style={{ width: contentWidth, position: 'relative', margin: '0 auto', transition: 'width 0.26s cubic-bezier(0.4, 0, 0.1, 1)' }}>
 
           <AnimatePresence initial={false}>
@@ -140,10 +147,10 @@ export default function App() {
                 }}
               >
                 <motion.div
-                  initial={{ opacity: 0, y: 14, scale: 0.98 }}
+                  initial={{ opacity: 0, y: 14, scale: 0.96 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 10, scale: 0.985 }}
-                  transition={TRANSITION}
+                  exit={{ opacity: 0, y: 10, scale: 0.97 }}
+                  transition={SPRING}
                 >
                   <div
                     data-clui-ui
@@ -153,18 +160,13 @@ export default function App() {
                       maxHeight: 470,
                     }}
                   >
-                    <MarketplacePanel />
+                    <Suspense fallback={<div style={{ height: 300 }} />}><MarketplacePanel /></Suspense>
                   </div>
                 </motion.div>
               </div>
             )}
           </AnimatePresence>
 
-          {/*
-            ─── Tabs / message shell ───
-            This always remains the chat shell. The marketplace is a separate
-            panel rendered above it, never inside it.
-          */}
           <motion.div
             data-clui-ui
             className="overflow-hidden flex flex-col drag-region"
@@ -177,7 +179,7 @@ export default function App() {
               borderColor: colors.containerBorder,
               boxShadow: isExpanded ? colors.cardShadow : colors.cardShadowCollapsed,
             }}
-            transition={TRANSITION}
+            transition={SPRING}
             style={{
               borderWidth: 1,
               borderStyle: 'solid',
@@ -186,19 +188,17 @@ export default function App() {
               zIndex: isExpanded ? 20 : 10,
             }}
           >
-            {/* Tab strip — always mounted */}
             <div className="no-drag">
               <TabStrip />
             </div>
 
-            {/* Body — chat history only; the marketplace is a separate overlay above */}
             <motion.div
               initial={false}
               animate={{
                 height: isExpanded ? 'auto' : 0,
                 opacity: isExpanded ? 1 : 0,
               }}
-              transition={TRANSITION}
+              transition={{ type: 'spring', stiffness: 260, damping: 28, mass: 1.0, bounce: 0, opacity: { duration: 0.2, ease: 'easeInOut' } }}
               className="overflow-hidden no-drag"
             >
               <div style={{ maxHeight: bodyMaxHeight }}>
@@ -208,16 +208,12 @@ export default function App() {
             </motion.div>
           </motion.div>
 
-          {/* ─── Input row — circles float outside left ─── */}
-          {/* marginBottom: shadow buffer so the glass-surface drop shadow isn't clipped at the native window edge */}
           <div data-clui-ui className="relative" style={{ minHeight: 46, zIndex: 15, marginBottom: 10 }}>
-            {/* Stacked circle buttons — expand on hover */}
             <div
               data-clui-ui
               className="circles-out"
             >
               <div className="btn-stack">
-                {/* btn-1: Attach (front, rightmost) */}
                 <button
                   className="stack-btn stack-btn-1 glass-surface"
                   title="Attach file"
@@ -226,7 +222,6 @@ export default function App() {
                 >
                   <Paperclip size={17} />
                 </button>
-                {/* btn-2: Screenshot (middle) */}
                 <button
                   className="stack-btn stack-btn-2 glass-surface"
                   title="Take screenshot"
@@ -235,7 +230,6 @@ export default function App() {
                 >
                   <Camera size={17} />
                 </button>
-                {/* btn-3: Skills (back, leftmost) */}
                 <button
                   className="stack-btn stack-btn-3 glass-surface"
                   title="Skills & Plugins"
@@ -247,7 +241,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Input pill */}
             <div
               data-clui-ui
               className="glass-surface w-full"
@@ -257,7 +250,7 @@ export default function App() {
             </div>
           </div>
         </div>
-      </div>
+      </motion.div>
     </PopoverLayerProvider>
   )
 }

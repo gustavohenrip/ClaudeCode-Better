@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
   Trash, Cpu, CurrencyDollar, Question, HardDrives, Sparkle, Brain, Lightning,
+  ArrowsClockwise, Gauge, ShieldCheck, Gear, Stethoscope, Export, Copy, FastForward,
+  ChartBar, GitBranch, FileText, ArrowCounterClockwise,
 } from '@phosphor-icons/react'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors } from '../theme'
@@ -11,17 +13,32 @@ export interface SlashCommand {
   command: string
   description: string
   icon: React.ReactNode
+  target?: 'local' | 'cli'
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { command: '/clear', description: 'Clear conversation history', icon: <Trash size={13} /> },
-  { command: '/cost', description: 'Show token usage and cost', icon: <CurrencyDollar size={13} /> },
-  { command: '/model', description: 'Show current model info', icon: <Cpu size={13} /> },
-  { command: '/effort', description: 'Set effort level: low, medium, high', icon: <Lightning size={13} /> },
-  { command: '/thinking', description: 'Toggle extended thinking on/off', icon: <Brain size={13} /> },
-  { command: '/mcp', description: 'Show MCP server status', icon: <HardDrives size={13} /> },
-  { command: '/skills', description: 'Show available skills', icon: <Sparkle size={13} /> },
-  { command: '/help', description: 'Show available commands', icon: <Question size={13} /> },
+  { command: '/clear', description: 'Clear conversation history', icon: <Trash size={13} />, target: 'local' },
+  { command: '/compact', description: 'Compact conversation context', icon: <ArrowsClockwise size={13} />, target: 'cli' },
+  { command: '/config', description: 'Open settings', icon: <Gear size={13} />, target: 'cli' },
+  { command: '/context', description: 'Show context usage info', icon: <Gauge size={13} />, target: 'cli' },
+  { command: '/copy', description: 'Copy last response', icon: <Copy size={13} />, target: 'cli' },
+  { command: '/cost', description: 'Show token usage and cost', icon: <CurrencyDollar size={13} />, target: 'local' },
+  { command: '/diff', description: 'Show file changes', icon: <GitBranch size={13} />, target: 'cli' },
+  { command: '/doctor', description: 'Diagnose installation', icon: <Stethoscope size={13} />, target: 'cli' },
+  { command: '/effort', description: 'Set effort level', icon: <Lightning size={13} />, target: 'local' },
+  { command: '/export', description: 'Export conversation', icon: <Export size={13} />, target: 'cli' },
+  { command: '/fast', description: 'Toggle fast mode', icon: <FastForward size={13} />, target: 'cli' },
+  { command: '/help', description: 'Show available commands', icon: <Question size={13} />, target: 'local' },
+  { command: '/init', description: 'Initialize project CLAUDE.md', icon: <FileText size={13} />, target: 'cli' },
+  { command: '/mcp', description: 'Show MCP server status', icon: <HardDrives size={13} />, target: 'local' },
+  { command: '/memory', description: 'Edit CLAUDE.md memories', icon: <Brain size={13} />, target: 'cli' },
+  { command: '/model', description: 'Show or switch model', icon: <Cpu size={13} />, target: 'local' },
+  { command: '/permissions', description: 'View tool permissions', icon: <ShieldCheck size={13} />, target: 'cli' },
+  { command: '/rewind', description: 'Revert to checkpoint', icon: <ArrowCounterClockwise size={13} />, target: 'cli' },
+  { command: '/skills', description: 'Show available skills', icon: <Sparkle size={13} />, target: 'local' },
+  { command: '/status', description: 'Show session status', icon: <ChartBar size={13} />, target: 'cli' },
+  { command: '/thinking', description: 'Toggle extended thinking', icon: <Brain size={13} />, target: 'local' },
+  { command: '/usage', description: 'Show plan limits', icon: <CurrencyDollar size={13} />, target: 'cli' },
 ]
 
 interface Props {
@@ -64,10 +81,10 @@ export function SlashCommandMenu({ filter, selectedIndex, onSelect, anchorRect, 
   return createPortal(
     <motion.div
       data-clui-ui
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 4 }}
-      transition={{ duration: 0.12 }}
+      initial={{ opacity: 0, y: 6, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 4, scale: 0.97 }}
+      transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.6 }}
       style={{
         position: 'fixed',
         bottom: window.innerHeight - anchorRect.top + 4,

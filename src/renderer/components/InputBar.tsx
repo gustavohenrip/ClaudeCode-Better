@@ -1,9 +1,9 @@
-import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
+import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
-import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
+import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
 
 const INPUT_MIN_HEIGHT = 20
@@ -25,6 +25,8 @@ export function InputBar() {
   const [slashFilter, setSlashFilter] = useState<string | null>(null)
   const [slashIndex, setSlashIndex] = useState(0)
   const [isMultiLine, setIsMultiLine] = useState(false)
+  const [sendPulse, setSendPulse] = useState(false)
+  const sendPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const measureRef = useRef<HTMLTextAreaElement | null>(null)
@@ -41,7 +43,7 @@ export function InputBar() {
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const activeTabId = useSessionStore((s) => s.activeTabId)
-  const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
+  const tab = useActiveTab()
   const effort = useThemeStore((s) => s.effort)
   const setEffort = useThemeStore((s) => s.setEffort)
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
@@ -53,11 +55,12 @@ export function InputBar() {
   const canSend = !!tab && !isConnecting && hasContent
   const attachments = tab?.attachments || []
   const showSlashMenu = slashFilter !== null && !isConnecting
-  const skillCommands: SlashCommand[] = (tab?.sessionSkills || []).map((skill) => ({
+  const sessionSkills = tab?.sessionSkills
+  const skillCommands: SlashCommand[] = useMemo(() => (sessionSkills || []).map((skill) => ({
     command: `/${skill}`,
     description: `Run skill: ${skill}`,
     icon: <span className="text-[11px]">✦</span>,
-  }))
+  })), [sessionSkills])
 
   useEffect(() => {
     textareaRef.current?.focus()
@@ -147,6 +150,7 @@ export function InputBar() {
         measureRef.current.remove()
         measureRef.current = null
       }
+      if (sendPulseTimerRef.current) clearTimeout(sendPulseTimerRef.current)
     }
   }, [])
 
@@ -218,29 +222,33 @@ export function InputBar() {
         }
         break
       }
-      case '/effort':
-        addSystemMessage(`Effort: ${effort}\n\nSet with: /effort low, /effort medium, /effort high`)
+      case '/effort': {
+        const isOpus = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
+        const effortOpts = isOpus ? 'low, medium, high, max' : 'low, medium, high'
+        addSystemMessage(`Effort: ${effort}\n\nSet with: /effort ${effortOpts}`)
         break
+      }
       case '/thinking':
         setThinkingEnabled(!thinkingEnabled)
         addSystemMessage(`Thinking ${!thinkingEnabled ? 'enabled' : 'disabled'}`)
         break
       case '/help': {
-        const lines = [
-          '/clear — Clear conversation history',
-          '/cost — Show token usage and cost',
-          '/model — Show model info & switch models',
-          '/effort — Set effort level (low / medium / high)',
-          '/thinking — Toggle extended thinking on/off',
-          '/mcp — Show MCP server status',
-          '/skills — Show available skills',
-          '/help — Show this list',
-        ]
+        const lines = SLASH_COMMANDS.map((c) => `${c.command} — ${c.description}`)
         addSystemMessage(lines.join('\n'))
         break
       }
     }
   }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel, effort, thinkingEnabled, setThinkingEnabled])
+
+  const sendCliCommand = useCallback((command: string) => {
+    if (!tab?.claudeSessionId) {
+      addSystemMessage('No active session. Send a message first.')
+      return
+    }
+    setInput('')
+    setSlashFilter(null)
+    sendMessage(command)
+  }, [tab?.claudeSessionId, sendMessage, addSystemMessage])
 
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     const isSkillCommand = !!tab?.sessionSkills?.includes(cmd.command.replace(/^\//, ''))
@@ -250,10 +258,14 @@ export function InputBar() {
       requestAnimationFrame(() => textareaRef.current?.focus())
       return
     }
+    if (cmd.target === 'cli') {
+      sendCliCommand(cmd.command)
+      return
+    }
     setInput('')
     setSlashFilter(null)
     executeCommand(cmd)
-  }, [executeCommand, tab?.sessionSkills])
+  }, [executeCommand, sendCliCommand, tab?.sessionSkills])
 
   // ─── Send ───
   const handleSend = useCallback(() => {
@@ -286,7 +298,9 @@ export function InputBar() {
     const effortMatch = prompt.match(/^\/effort\s+(\S+)/i)
     if (effortMatch) {
       const val = effortMatch[1].toLowerCase() as EffortLevel
-      if (['low', 'medium', 'high'].includes(val)) {
+      const isOpus = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
+      const validEfforts = isOpus ? ['low', 'medium', 'high', 'max'] : ['low', 'medium', 'high']
+      if (validEfforts.includes(val)) {
         setEffort(val)
         setInput('')
         setSlashFilter(null)
@@ -294,7 +308,7 @@ export function InputBar() {
       } else {
         setInput('')
         setSlashFilter(null)
-        addSystemMessage(`Unknown effort "${effortMatch[1]}". Available: low, medium, high`)
+        addSystemMessage(`Unknown effort "${effortMatch[1]}". Available: ${validEfforts.join(', ')}`)
       }
       return
     }
@@ -318,6 +332,14 @@ export function InputBar() {
       }
       return
     }
+    if (prompt.startsWith('/')) {
+      const cmdName = prompt.split(/\s/)[0].toLowerCase()
+      const knownCmd = SLASH_COMMANDS.find((c) => c.command === cmdName)
+      if (knownCmd?.target === 'cli') {
+        sendCliCommand(prompt)
+        return
+      }
+    }
     if (!prompt && attachments.length === 0) return
     if (isConnecting) return
     setInput('')
@@ -325,21 +347,31 @@ export function InputBar() {
     if (textareaRef.current) {
       textareaRef.current.style.height = `${INPUT_MIN_HEIGHT}px`
     }
+    setSendPulse(true)
+    if (sendPulseTimerRef.current) clearTimeout(sendPulseTimerRef.current)
+    sendPulseTimerRef.current = setTimeout(() => setSendPulse(false), 500)
     sendMessage(prompt || 'See attached files')
-    // Refocus after React re-renders from the state update
     requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, setEffort, setThinkingEnabled])
+  }, [input, isBusy, sendMessage, sendCliCommand, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect, setEffort, setThinkingEnabled])
 
   // ─── Keyboard ───
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (showSlashMenu) {
       const filtered = getFilteredCommandsWithExtras(slashFilter!, skillCommands)
+      if (filtered.length === 0) { if (e.key === 'Escape') { e.preventDefault(); setSlashFilter(null) }; return }
       if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => (i + 1) % filtered.length); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => (i - 1 + filtered.length) % filtered.length); return }
-      if (e.key === 'Tab') { e.preventDefault(); if (filtered.length > 0) handleSlashSelect(filtered[slashIndex]); return }
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        const selected = filtered[Math.min(slashIndex, filtered.length - 1)]
+        setInput(selected.command + ' ')
+        setSlashFilter(null)
+        requestAnimationFrame(() => textareaRef.current?.focus())
+        return
+      }
       if (e.key === 'Escape') { e.preventDefault(); setSlashFilter(null); return }
     }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); handleSend() }
     if (e.key === 'Escape' && !showSlashMenu) { window.clui.hideWindow() }
   }
 
@@ -424,7 +456,7 @@ export function InputBar() {
   const hasAttachments = attachments.length > 0
 
   return (
-    <div ref={wrapperRef} data-clui-ui className="flex flex-col w-full relative">
+    <div ref={wrapperRef} data-clui-ui className={`flex flex-col w-full relative ${sendPulse ? 'animate-send-pulse' : ''}`}>
       {/* Slash command menu */}
       <AnimatePresence>
         {showSlashMenu && (
@@ -491,15 +523,18 @@ export function InputBar() {
               <AnimatePresence>
                 {canSend && voiceState !== 'recording' && (
                   <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
-                    <button
+                    <motion.button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={handleSend}
                       className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
                       style={{ background: colors.sendBg, color: colors.textOnAccent }}
                       title={isBusy ? 'Queue message' : 'Send (Enter)'}
+                      whileHover={{ scale: 1.08 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
                     >
                       <ArrowUp size={16} weight="bold" />
-                    </button>
+                    </motion.button>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -549,15 +584,18 @@ export function InputBar() {
               <AnimatePresence>
                 {canSend && voiceState !== 'recording' && (
                   <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
-                    <button
+                    <motion.button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={handleSend}
                       className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
                       style={{ background: colors.sendBg, color: colors.textOnAccent }}
                       title={isBusy ? 'Queue message' : 'Send (Enter)'}
+                      whileHover={{ scale: 1.08 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
                     >
                       <ArrowUp size={16} weight="bold" />
-                    </button>
+                    </motion.button>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -597,24 +635,28 @@ function VoiceButtons({ voiceState, isConnecting, colors, onToggle, onCancel, on
           transition={{ duration: 0.12 }}
           className="flex items-center gap-1"
         >
-          <button
+          <motion.button
             onMouseDown={(e) => e.preventDefault()}
             onClick={onCancel}
             className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
             style={{ background: colors.surfaceHover, color: colors.textTertiary }}
             title="Cancel recording"
+            whileHover={{ scale: 1.08 }}
+            whileTap={{ scale: 0.9 }}
           >
             <X size={15} weight="bold" />
-          </button>
-          <button
+          </motion.button>
+          <motion.button
             onMouseDown={(e) => e.preventDefault()}
             onClick={onStop}
             className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
             style={{ background: colors.accent, color: colors.textOnAccent }}
             title="Confirm recording"
+            whileHover={{ scale: 1.08 }}
+            whileTap={{ scale: 0.9 }}
           >
             <Check size={15} weight="bold" />
-          </button>
+          </motion.button>
         </motion.div>
       ) : voiceState === 'transcribing' ? (
         <motion.div key="transcribing" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
@@ -628,7 +670,7 @@ function VoiceButtons({ voiceState, isConnecting, colors, onToggle, onCancel, on
         </motion.div>
       ) : (
         <motion.div key="mic" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
-          <button
+          <motion.button
             onMouseDown={(e) => e.preventDefault()}
             onClick={onToggle}
             disabled={isConnecting}
@@ -638,9 +680,11 @@ function VoiceButtons({ voiceState, isConnecting, colors, onToggle, onCancel, on
               color: isConnecting ? colors.micDisabled : colors.micColor,
             }}
             title="Voice input"
+            whileHover={isConnecting ? {} : { scale: 1.08 }}
+            whileTap={isConnecting ? {} : { scale: 0.9 }}
           >
             <Microphone size={16} />
-          </button>
+          </motion.button>
         </motion.div>
       )}
     </AnimatePresence>

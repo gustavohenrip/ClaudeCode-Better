@@ -32,7 +32,6 @@ function formatInput(input?: Record<string, unknown>): string | null {
 
   const parts: string[] = []
   for (const [key, value] of entries) {
-    // Defense-in-depth: mask sensitive fields (backend already masks too)
     if (SENSITIVE_FIELD_RE.test(key)) {
       parts.push(`${key}: ***`)
       continue
@@ -49,13 +48,12 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
   const colors = useColors()
   const [responded, setResponded] = React.useState(false)
 
-  // Reset responded flag when the displayed permission changes (queue advancing)
   React.useEffect(() => {
     setResponded(false)
   }, [permission.questionId])
 
   const handleOption = (optionId: string) => {
-    if (responded) return // Prevent double-send
+    if (responded) return
     setResponded(true)
     respondPermission(tabId, permission.questionId, optionId)
   }
@@ -64,10 +62,10 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8, scale: 0.97 }}
+      initial={{ opacity: 0, y: 8, scale: 0.95 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -4, scale: 0.97 }}
-      transition={{ duration: 0.2 }}
+      transition={{ type: 'spring', stiffness: 350, damping: 26, mass: 0.7 }}
       className="mx-4 mt-2 mb-2"
     >
       <div
@@ -77,9 +75,8 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
           borderRadius: 12,
           boxShadow: colors.permissionShadow,
         }}
-        className="overflow-hidden"
+        className="overflow-hidden animate-glow-pulse"
       >
-        {/* Header */}
         <div
           className="flex items-center gap-1.5 px-3 py-1.5"
           style={{

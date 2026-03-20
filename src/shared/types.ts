@@ -172,6 +172,8 @@ export interface TabState {
   hasChosenDirectory: boolean
   /** Extra directories accessible via --add-dir (session-preserving) */
   additionalDirs: string[]
+  /** Accumulated token usage for the current session */
+  tokenUsage: { input: number; output: number; cacheRead: number; cacheCreation: number }
 }
 
 export interface Message {
@@ -225,9 +227,10 @@ export interface RunOptions {
   /** Extra directories to add via --add-dir (session-preserving) */
   addDirs?: string[]
   /** Reasoning effort level passed via --effort */
-  effort?: 'low' | 'medium' | 'high'
+  effort?: 'low' | 'medium' | 'high' | 'max'
   /** Thinking mode passed via --thinking */
   thinking?: 'adaptive' | 'disabled'
+  cliPermissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions'
 }
 
 // ─── Control Plane Types ───
@@ -311,6 +314,7 @@ export const IPC = {
   PROMPT: 'clui:prompt',
   CANCEL: 'clui:cancel',
   STOP_TAB: 'clui:stop-tab',
+  INTERRUPT_AND_SEND: 'clui:interrupt-and-send',
   RETRY: 'clui:retry',
   STATUS: 'clui:status',
   TAB_HEALTH: 'clui:tab-health',

@@ -59,6 +59,8 @@ export class ControlPlane extends EventEmitter {
   private tabs = new Map<string, TabRegistryEntry>()
   private inflightRequests = new Map<string, InflightRequest>()
   private requestQueue: QueuedRequest[] = []
+  private interruptLocks = new Map<string, Promise<void>>()
+  private staleRequests = new Set<string>()
   private runManager: RunManager
   private ptyRunManager: PtyRunManager
   /** Feature flag: use PTY transport for interactive permissions */
@@ -137,6 +139,8 @@ export class ControlPlane extends EventEmitter {
     // ─── Wire RunManager events → ControlPlane routing ───
 
     this.runManager.on('normalized', (requestId: string, event: NormalizedEvent) => {
+      if (this.staleRequests.has(requestId)) return
+
       const tabId = this._findTabByRequest(requestId)
       if (!tabId) return
 
@@ -193,12 +197,25 @@ export class ControlPlane extends EventEmitter {
 
       const tab = this.tabs.get(tabId)!
 
+      if (this.staleRequests.has(requestId)) {
+        this.staleRequests.delete(requestId)
+        if (tab.activeRequestId === requestId) {
+          tab.activeRequestId = null
+          tab.runPid = null
+        }
+        if (sessionId) tab.claudeSessionId = sessionId
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        return
+      }
+
       tab.activeRequestId = null
       tab.runPid = null
 
       if (sessionId) tab.claudeSessionId = sessionId
 
-      // Init request: silently transition to idle
       if (this.initRequestIds.has(requestId)) {
         this.initRequestIds.delete(requestId)
         this._setTabStatus(tabId, 'idle')
@@ -213,22 +230,18 @@ export class ControlPlane extends EventEmitter {
       if (code === 0) {
         this._setTabStatus(tabId, 'completed')
       } else if (signal === 'SIGINT' || signal === 'SIGKILL') {
-        // Cancelled by user
         this._setTabStatus(tabId, 'failed')
       } else {
-        // Unexpected exit — emit enriched error (includes stderr tail)
         const enriched = this.runManager.getEnrichedError(requestId, code)
         this.emit('error', tabId, enriched)
         this._setTabStatus(tabId, code === null ? 'dead' : 'failed')
       }
 
-      // Resolve the inflight promise
       if (inflight) {
         inflight.resolve()
         this.inflightRequests.delete(requestId)
       }
 
-      // Process next queued request for this tab
       this._processQueue(tabId)
     })
 
@@ -254,10 +267,23 @@ export class ControlPlane extends EventEmitter {
       }
 
       const tab = this.tabs.get(tabId)!
+
+      if (this.staleRequests.has(requestId)) {
+        this.staleRequests.delete(requestId)
+        if (tab.activeRequestId === requestId) {
+          tab.activeRequestId = null
+          tab.runPid = null
+        }
+        if (inflight) {
+          inflight.resolve()
+          this.inflightRequests.delete(requestId)
+        }
+        return
+      }
+
       tab.activeRequestId = null
       tab.runPid = null
 
-      // Init request: silently fail, go idle so user can still use the tab
       if (this.initRequestIds.has(requestId)) {
         this.initRequestIds.delete(requestId)
         log(`Init session error for tab ${tabId}: ${err.message}`)
@@ -291,6 +317,8 @@ export class ControlPlane extends EventEmitter {
   private _wirePtyEvents(): void {
     // Normalized events → same routing as RunManager
     this.ptyRunManager.on('normalized', (requestId: string, event: NormalizedEvent) => {
+      if (this.staleRequests.has(requestId)) return
+
       const tabId = this._findTabByRequest(requestId)
       if (!tabId) return
 
@@ -611,6 +639,10 @@ export class ControlPlane extends EventEmitter {
       }
     }
 
+    if (this.permissionMode === 'auto') {
+      options = { ...options, cliPermissionMode: 'bypassPermissions' }
+    }
+
     tab.activeRequestId = requestId
     if (!this.initRequestIds.has(requestId)) tab.promptCount++
     tab.lastActivityAt = Date.now()
@@ -686,12 +718,77 @@ export class ControlPlane extends EventEmitter {
     return this.cancel(tab.activeRequestId)
   }
 
-  // ─── Retry ───
+  async interruptAndSend(tabId: string, requestId: string, options: RunOptions): Promise<void> {
+    const existing = this.interruptLocks.get(tabId)
+    if (existing) {
+      try { await existing } catch {}
+    }
 
-  /**
-   * Retry: re-submit the same prompt on the same tab/session.
-   * If the tab is dead, creates a fresh session.
-   */
+    const promise = this._doInterruptAndSend(tabId, requestId, options)
+    this.interruptLocks.set(tabId, promise)
+    try {
+      await promise
+    } finally {
+      if (this.interruptLocks.get(tabId) === promise) {
+        this.interruptLocks.delete(tabId)
+      }
+    }
+  }
+
+  private async _doInterruptAndSend(tabId: string, requestId: string, options: RunOptions): Promise<void> {
+    const tab = this.tabs.get(tabId)
+    if (!tab) throw new Error(`Tab ${tabId} does not exist`)
+
+    if (tab.activeRequestId) {
+      const oldRequestId = tab.activeRequestId
+      this.staleRequests.add(oldRequestId)
+
+      this.requestQueue = this.requestQueue.filter((r) => {
+        if (r.tabId === tabId) {
+          const reason = new Error('Interrupted by user message')
+          r.reject(reason)
+          for (const w of r.extraWaiters) w.reject(reason)
+          return false
+        }
+        return true
+      })
+
+      this.cancel(oldRequestId)
+
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 10000
+        const check = () => {
+          const current = this.tabs.get(tabId)
+          if (!current?.activeRequestId) {
+            resolve()
+            return
+          }
+          if (Date.now() > deadline) {
+            if (current) {
+              current.activeRequestId = null
+              current.runPid = null
+            }
+            log(`interruptAndSend: timeout waiting for cancel on tab ${tabId}, force-clearing`)
+            resolve()
+            return
+          }
+          setTimeout(check, 30)
+        }
+        check()
+      })
+    }
+
+    const currentTab = this.tabs.get(tabId)
+    if (currentTab && (currentTab.status === 'failed' || currentTab.status === 'dead' || currentTab.status === 'completed')) {
+      if (currentTab.status === 'dead') {
+        currentTab.claudeSessionId = null
+      }
+      this._setTabStatus(tabId, 'idle')
+    }
+
+    return this.submitPrompt(tabId, requestId, options)
+  }
+
   async retry(tabId: string, requestId: string, options: RunOptions): Promise<void> {
     const tab = this.tabs.get(tabId)
     if (!tab) throw new Error(`Tab ${tabId} does not exist`)

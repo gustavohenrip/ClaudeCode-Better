@@ -1,7 +1,7 @@
 import { net } from 'electron'
 import { execFile } from 'child_process'
 import { readFile, readdir, mkdir, writeFile, rm } from 'fs/promises'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import type { CatalogPlugin } from '../../shared/types'
 import { log as _log } from '../logger'
@@ -9,6 +9,19 @@ import { getCliEnv } from '../cli-env'
 
 function log(msg: string): void {
   _log('marketplace', msg)
+}
+
+const SAFE_PLUGIN_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
+
+function validatePluginName(name: string): void {
+  if (!SAFE_PLUGIN_NAME_RE.test(name)) {
+    throw new Error(`Invalid plugin name: ${name}`)
+  }
+  const skillsBase = resolve(homedir(), '.claude', 'skills')
+  const resolved = resolve(skillsBase, name)
+  if (!resolved.startsWith(skillsBase)) {
+    throw new Error(`Path traversal detected in plugin name: ${name}`)
+  }
 }
 
 // ─── Sources ───
@@ -248,8 +261,8 @@ export async function installPlugin(
   isSkillMd?: boolean
 ): Promise<{ ok: boolean; error?: string }> {
   try {
+    validatePluginName(pluginName)
     if (isSkillMd !== false) {
-      // Direct SKILL.md install
       const skillsDir = join(homedir(), '.claude', 'skills', pluginName)
 
       // Check if we have cached content from the catalog fetch
@@ -295,6 +308,7 @@ export async function uninstallPlugin(
   pluginName: string
 ): Promise<{ ok: boolean; error?: string }> {
   try {
+    validatePluginName(pluginName)
     const skillsDir = join(homedir(), '.claude', 'skills', pluginName)
     await rm(skillsDir, { recursive: true, force: true })
     log(`uninstallPlugin: removed ${skillsDir}`)

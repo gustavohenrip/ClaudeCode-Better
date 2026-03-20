@@ -101,10 +101,19 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
     }
 
     case 'message_start':
-    case 'message_delta':
     case 'message_stop':
-      // These are structural events — the assembled `assistant` event handles message completion
       return []
+
+    case 'message_delta': {
+      const md = sub as { type: 'message_delta'; delta: { stop_reason: string | null }; usage?: Record<string, unknown>; context_management?: { applied_edits?: Array<{ cleared_input_tokens?: number }> } }
+      if (md.context_management?.applied_edits && md.context_management.applied_edits.length > 0) {
+        const cleared = md.context_management.applied_edits.reduce((sum, e) => sum + (e.cleared_input_tokens || 0), 0)
+        if (cleared > 0) {
+          return [{ type: 'text_chunk', text: `\n[Context compacted — ${Math.round(cleared / 1000)}k tokens cleared]\n` }]
+        }
+      }
+      return []
+    }
 
     default:
       return []

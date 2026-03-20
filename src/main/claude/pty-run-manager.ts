@@ -17,7 +17,7 @@
 
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, dirname, delimiter } from 'path'
 import { execSync } from 'child_process'
 import { appendFileSync, chmodSync, existsSync, statSync } from 'fs'
 import type { NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
@@ -268,6 +268,8 @@ export interface PtyRunHandle {
   promptSnippet: string
   /** Whether we saw an echoed prompt for current request */
   sawPromptEcho: boolean
+  /** Current question ID for permission response validation */
+  currentQuestionId: string | null
 }
 
 // ─── PtyRunManager ───
@@ -289,6 +291,7 @@ export class PtyRunManager extends EventEmitter {
    * Ensure it's executable at runtime to avoid "posix_spawnp failed".
    */
   private _ensureSpawnHelperExecutable(): void {
+    if (process.platform === 'win32') return
     try {
       const pkgPath = require.resolve('node-pty/package.json')
       const path = require('path') as typeof import('path')
@@ -311,6 +314,28 @@ export class PtyRunManager extends EventEmitter {
   }
 
   private _findClaudeBinary(): string {
+    if (process.platform === 'win32') {
+      try {
+        const result = execSync('where.exe claude', { encoding: 'utf-8', timeout: 3000, env: getCliEnv() }).trim()
+        if (result) return result.split(/\r?\n/)[0].trim()
+      } catch {}
+
+      const home = homedir()
+      const appdata = process.env.APPDATA || ''
+      const winCandidates = [
+        join(appdata, 'npm', 'claude.cmd'),
+        join(home, '.npm-global', 'claude.cmd'),
+        join(appdata, 'npm', 'claude'),
+        join(home, '.npm-global', 'claude'),
+      ]
+      for (const c of winCandidates) {
+        try {
+          if (existsSync(c)) return c
+        } catch {}
+      }
+      return 'claude'
+    }
+
     const candidates = [
       '/usr/local/bin/claude',
       '/opt/homebrew/bin/claude',
@@ -337,11 +362,10 @@ export class PtyRunManager extends EventEmitter {
 
   private _getEnv(): NodeJS.ProcessEnv {
     const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
+    const binDir = dirname(this.claudeBinary)
     if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+      env.PATH = `${binDir}${delimiter}${env.PATH}`
     }
-
     return env
   }
 
@@ -350,11 +374,15 @@ export class PtyRunManager extends EventEmitter {
       throw new Error('node-pty is not available — cannot use PTY transport')
     }
 
+    if (this.activeRuns.has(requestId)) {
+      throw new Error(`Run ${requestId} is already active`)
+    }
+
     const cwd = options.projectPath === '~' ? homedir() : options.projectPath
 
     // Build args for interactive mode (no -p flag)
     const args: string[] = [
-      '--permission-mode', 'default',
+      '--permission-mode', options.cliPermissionMode || 'default',
     ]
 
     if (options.sessionId) {
@@ -376,7 +404,14 @@ export class PtyRunManager extends EventEmitter {
     log(`Starting PTY run ${requestId}: ${this.claudeBinary} ${args.join(' ')}`)
     log(`Prompt: ${options.prompt.substring(0, 200)}`)
 
-    const ptyProcess = pty.spawn(this.claudeBinary, args, {
+    let spawnBin = this.claudeBinary
+    let spawnArgs = args
+    if (process.platform === 'win32' && (this.claudeBinary.endsWith('.cmd') || this.claudeBinary.endsWith('.bat'))) {
+      spawnArgs = ['/c', this.claudeBinary, ...args]
+      spawnBin = 'cmd.exe'
+    }
+
+    const ptyProcess = pty.spawn(spawnBin, spawnArgs, {
       name: 'xterm-256color',
       cols: 120,
       rows: 40,
@@ -409,6 +444,7 @@ export class PtyRunManager extends EventEmitter {
       lastOutputAt: Date.now(),
       promptSnippet: options.prompt.trim().toLowerCase().slice(0, 24),
       sawPromptEcho: false,
+      currentQuestionId: null,
     }
 
     // ─── PTY output parser pipeline ───
@@ -442,17 +478,20 @@ export class PtyRunManager extends EventEmitter {
           // append \r to buffer so the \n branch can strip it.
           const next = ci + 1 < chars.length ? chars[ci + 1] : null
           if (next === '\n' || next === '\r') {
-            // Part of line ending sequence — keep in buffer for \n to strip
             lineBuffer += '\r'
+            if (lineBuffer.length > 262144) lineBuffer = lineBuffer.slice(-131072)
           } else if (next === null) {
-            // End of chunk — we don't know what comes next, buffer it
             lineBuffer += '\r'
+            if (lineBuffer.length > 262144) lineBuffer = lineBuffer.slice(-131072)
           } else {
             // \r followed by printable text → Ink redraw: reset line
             lineBuffer = ''
           }
         } else {
           lineBuffer += ch
+          if (lineBuffer.length > 262144) {
+            lineBuffer = lineBuffer.slice(-131072)
+          }
         }
       }
 
@@ -561,10 +600,19 @@ export class PtyRunManager extends EventEmitter {
     }
 
     // ─── Permission phase: collecting detection context ───
+    if (/compacting conversation/i.test(cleaned) && /esc to interrupt/i.test(cleaned)) {
+      this._flushText(requestId, handle)
+      this.emit('normalized', requestId, {
+        type: 'text_chunk',
+        text: '\n[Compacting conversation...]\n',
+      } as NormalizedEvent)
+      return
+    }
+
     if (handle.permissionPhase === 'detecting' || handle.permissionPhase === 'idle') {
       this._checkPermissionInBuffer(requestId, handle, cleaned)
       if (handle.permissionPhase === 'waiting_user') {
-        return // Permission prompt detected and emitted
+        return
       }
     }
 
@@ -668,7 +716,8 @@ export class PtyRunManager extends EventEmitter {
    * Check the current buffer for permission prompt patterns.
    */
   private _checkPermissionInBuffer(requestId: string, handle: PtyRunHandle, currentLine: string): void {
-    // Add current line to detection context
+    if (handle.permissionPhase === 'waiting_user') return
+
     const detectionWindow = [...handle.ptyBuffer.slice(-10), currentLine]
 
     const permission = detectPermissionPrompt(detectionWindow)
@@ -687,11 +736,10 @@ export class PtyRunManager extends EventEmitter {
     handle.pendingPermission = permission
     handle.permissionPhase = 'waiting_user'
 
-    // Flush any accumulated text first
     this._flushText(requestId, handle)
 
-    // Generate a unique question ID
     const questionId = `pty-perm-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+    handle.currentQuestionId = questionId
 
     // Emit permission_request event
     this.emit('normalized', requestId, {
@@ -727,7 +775,7 @@ export class PtyRunManager extends EventEmitter {
   /**
    * Respond to a permission prompt by sending keystrokes to the PTY.
    */
-  respondToPermission(requestId: string, _questionId: string, optionId: string): boolean {
+  respondToPermission(requestId: string, questionId: string, optionId: string): boolean {
     const handle = this.activeRuns.get(requestId)
     if (!handle) {
       log(`respondToPermission: no active run for ${requestId}`)
@@ -739,16 +787,20 @@ export class PtyRunManager extends EventEmitter {
       return false
     }
 
-    // Clear timeout
-    if (handle.permissionTimeout) {
-      clearTimeout(handle.permissionTimeout)
-      handle.permissionTimeout = null
+    if (handle.currentQuestionId && questionId !== handle.currentQuestionId) {
+      log(`respondToPermission: stale questionId ${questionId} (expected ${handle.currentQuestionId})`)
+      return false
     }
 
     const option = handle.pendingPermission.options.find((o) => o.optionId === optionId)
     if (!option) {
       log(`respondToPermission: option ${optionId} not found`)
       return false
+    }
+
+    if (handle.permissionTimeout) {
+      clearTimeout(handle.permissionTimeout)
+      handle.permissionTimeout = null
     }
 
     log(`respondToPermission [${requestId}]: optionId=${optionId}, label=${option.label}`)
