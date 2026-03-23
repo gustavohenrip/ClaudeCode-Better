@@ -266,6 +266,76 @@ const lightColors = {
   permissionDeniedHeaderBorder: 'rgba(196, 112, 96, 0.12)',
 } as const
 
+const codexDarkColors = {
+  ...darkColors,
+  containerBg: '#1a1a1a',
+  containerBgCollapsed: '#191919',
+  containerBorder: '#404040',
+  containerShadow: '0 8px 28px rgba(0, 0, 0, 0.45), 0 1px 6px rgba(0, 0, 0, 0.3)',
+  cardShadow: '0 2px 8px rgba(0,0,0,0.45)',
+  cardShadowCollapsed: '0 2px 6px rgba(0,0,0,0.5)',
+  surfacePrimary: '#2a2a2a',
+  surfaceSecondary: '#333333',
+  surfaceHover: 'rgba(255, 255, 255, 0.04)',
+  surfaceActive: 'rgba(255, 255, 255, 0.07)',
+  inputFocusBorder: 'rgba(136, 136, 136, 0.4)',
+  inputPillBg: '#222222',
+  textPrimary: '#e0e0e0',
+  textSecondary: '#b0b0b0',
+  textTertiary: '#707070',
+  textMuted: '#2a2a2a',
+  accent: '#888888',
+  accentLight: 'rgba(136, 136, 136, 0.1)',
+  accentSoft: 'rgba(136, 136, 136, 0.15)',
+  statusRunning: '#888888',
+  statusRunningBg: 'rgba(136, 136, 136, 0.1)',
+  statusPermission: '#888888',
+  statusPermissionGlow: 'rgba(136, 136, 136, 0.4)',
+  tabActive: '#2a2a2a',
+  tabActiveBorder: '#404040',
+  tabHover: 'rgba(255, 255, 255, 0.04)',
+  userBubble: '#2a2a2a',
+  userBubbleBorder: '#404040',
+  userBubbleText: '#e0e0e0',
+  toolBg: '#2a2a2a',
+  toolBorder: '#404040',
+  toolRunningBorder: 'rgba(136, 136, 136, 0.3)',
+  toolRunningBg: 'rgba(136, 136, 136, 0.05)',
+  timelineLine: '#2a2a2a',
+  timelineNode: 'rgba(136, 136, 136, 0.2)',
+  timelineNodeActive: '#888888',
+  sendBg: '#888888',
+  sendHover: '#777777',
+  sendDisabled: 'rgba(136, 136, 136, 0.3)',
+  popoverBg: '#1e1e1e',
+  popoverBorder: '#404040',
+  popoverShadow: '0 4px 20px rgba(0,0,0,0.4), 0 1px 4px rgba(0,0,0,0.25)',
+  codeBg: '#151515',
+  accentBorder: 'rgba(136, 136, 136, 0.19)',
+  accentBorderMedium: 'rgba(136, 136, 136, 0.25)',
+} as const
+
+const codexLightColors = {
+  ...lightColors,
+  accent: '#888888',
+  accentLight: 'rgba(136, 136, 136, 0.1)',
+  accentSoft: 'rgba(136, 136, 136, 0.12)',
+  statusRunning: '#888888',
+  statusRunningBg: 'rgba(136, 136, 136, 0.1)',
+  statusPermission: '#888888',
+  statusPermissionGlow: 'rgba(136, 136, 136, 0.3)',
+  toolRunningBorder: 'rgba(136, 136, 136, 0.3)',
+  toolRunningBg: 'rgba(136, 136, 136, 0.05)',
+  timelineNode: 'rgba(136, 136, 136, 0.2)',
+  timelineNodeActive: '#888888',
+  sendBg: '#888888',
+  sendHover: '#777777',
+  sendDisabled: 'rgba(136, 136, 136, 0.3)',
+  inputFocusBorder: 'rgba(136, 136, 136, 0.4)',
+  accentBorder: 'rgba(136, 136, 136, 0.19)',
+  accentBorderMedium: 'rgba(136, 136, 136, 0.25)',
+} as const
+
 export type ColorPalette = { [K in keyof typeof darkColors]: string }
 
 // ─── Theme store ───
@@ -287,13 +357,16 @@ interface ThemeState {
   expandedUI: boolean
   effort: EffortLevel
   thinkingEnabled: boolean
+  defaultProvider: 'claude' | 'codex'
+  activeProvider: 'claude' | 'codex'
   globalRules: string
   rulesProfiles: RulesProfile[]
   activeProfileId: string | null
   freeRules: string
-  /** OS-reported dark mode — used when themeMode is 'system' */
   _systemIsDark: boolean
   setIsDark: (isDark: boolean) => void
+  setDefaultProvider: (provider: 'claude' | 'codex') => void
+  setActiveProvider: (provider: 'claude' | 'codex') => void
   setThemeMode: (mode: ThemeMode) => void
   setSoundEnabled: (enabled: boolean) => void
   setExpandedUI: (expanded: boolean) => void
@@ -305,7 +378,6 @@ interface ThemeState {
   updateProfileName: (id: string, name: string) => boolean
   setRulesContent: (content: string) => void
   deleteProfile: (id: string) => void
-  /** Called by OS theme change listener — updates system value */
   setSystemTheme: (isDark: boolean) => void
 }
 
@@ -322,10 +394,14 @@ function syncTokensToCss(tokens: ColorPalette): void {
   }
 }
 
-function applyTheme(isDark: boolean): void {
+function applyTheme(isDark: boolean, provider?: 'claude' | 'codex'): void {
   document.documentElement.classList.toggle('dark', isDark)
   document.documentElement.classList.toggle('light', !isDark)
-  syncTokensToCss(isDark ? darkColors : lightColors)
+  if (provider === 'codex') {
+    syncTokensToCss((isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette)
+  } else {
+    syncTokensToCss(isDark ? darkColors : lightColors)
+  }
 }
 
 const SETTINGS_KEY = 'clui-settings'
@@ -367,7 +443,7 @@ function saveRulesV1(state: { profiles: RulesProfile[]; activeProfileId: string 
   try { localStorage.setItem(RULES_V1_KEY, JSON.stringify({ version: 1, ...state })) } catch {}
 }
 
-function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean } {
+function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'codex' } {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (raw) {
@@ -378,13 +454,14 @@ function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expanded
         expandedUI: typeof parsed.expandedUI === 'boolean' ? parsed.expandedUI : false,
         effort: (['low', 'medium', 'high', 'max'] as EffortLevel[]).includes(parsed.effort) ? parsed.effort : 'medium',
         thinkingEnabled: typeof parsed.thinkingEnabled === 'boolean' ? parsed.thinkingEnabled : true,
+        defaultProvider: parsed.defaultProvider === 'codex' ? 'codex' : 'claude',
       }
     }
   } catch {}
-  return { themeMode: 'dark', soundEnabled: true, expandedUI: false, effort: 'medium', thinkingEnabled: true }
+  return { themeMode: 'dark', soundEnabled: true, expandedUI: false, effort: 'medium', thinkingEnabled: true, defaultProvider: 'claude' }
 }
 
-function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean }): void {
+function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'codex' }): void {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch {}
 }
 
@@ -398,6 +475,8 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   expandedUI: saved.expandedUI,
   effort: saved.effort,
   thinkingEnabled: saved.thinkingEnabled,
+  defaultProvider: saved.defaultProvider,
+  activeProvider: saved.defaultProvider,
   globalRules: savedRules.activeProfileId !== null
     ? (savedRules.profiles.find((p) => p.id === savedRules.activeProfileId)?.content ?? savedRules.freeRules)
     : savedRules.freeRules,
@@ -405,36 +484,49 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   activeProfileId: savedRules.activeProfileId,
   freeRules: savedRules.freeRules,
   _systemIsDark: typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true,
+  setDefaultProvider: (provider) => {
+    set({ defaultProvider: provider })
+    const s = get()
+    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: provider })
+  },
+  setActiveProvider: (provider) => {
+    const s = get()
+    set({ activeProvider: provider })
+    const palette = provider === 'codex'
+      ? (s.isDark ? codexDarkColors : codexLightColors)
+      : (s.isDark ? darkColors : lightColors)
+    syncTokensToCss(palette as unknown as ColorPalette)
+  },
   setIsDark: (isDark) => {
     set({ isDark })
-    applyTheme(isDark)
+    applyTheme(isDark, get().activeProvider)
   },
   setThemeMode: (mode) => {
     const resolved = mode === 'system' ? get()._systemIsDark : mode === 'dark'
     set({ themeMode: mode, isDark: resolved })
-    applyTheme(resolved)
+    applyTheme(resolved, get().activeProvider)
     const s = get()
-    saveSettings({ themeMode: mode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled })
+    saveSettings({ themeMode: mode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: s.defaultProvider })
   },
   setSoundEnabled: (enabled) => {
     set({ soundEnabled: enabled })
     const s = get()
-    saveSettings({ themeMode: s.themeMode, soundEnabled: enabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled })
+    saveSettings({ themeMode: s.themeMode, soundEnabled: enabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: s.defaultProvider })
   },
   setExpandedUI: (expanded) => {
     set({ expandedUI: expanded })
     const s = get()
-    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: expanded, effort: s.effort, thinkingEnabled: s.thinkingEnabled })
+    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: expanded, effort: s.effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: s.defaultProvider })
   },
   setEffort: (effort) => {
     set({ effort })
     const s = get()
-    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort, thinkingEnabled: s.thinkingEnabled })
+    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: s.defaultProvider })
   },
   setThinkingEnabled: (thinkingEnabled) => {
     set({ thinkingEnabled })
     const s = get()
-    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled })
+    saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled, defaultProvider: s.defaultProvider })
   },
   setGlobalRules: (rules) => {
     get().setRulesContent(rules)
@@ -507,7 +599,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     if (s._systemIsDark === isDark) return
     if (s.themeMode === 'system') {
       set({ _systemIsDark: isDark, isDark })
-      applyTheme(isDark)
+      applyTheme(isDark, s.activeProvider)
     } else {
       set({ _systemIsDark: isDark })
     }
@@ -518,14 +610,19 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
 const initialIsDark = saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true)
 syncTokensToCss(initialIsDark ? darkColors : lightColors)
 
-/** Reactive hook — returns the active color palette */
 export function useColors(): ColorPalette {
   const isDark = useThemeStore((s) => s.isDark)
+  const provider = useThemeStore((s) => s.activeProvider)
+  if (provider === 'codex') {
+    return (isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette
+  }
   return isDark ? darkColors : lightColors
 }
 
-/** Non-reactive getter — use outside React components */
-export function getColors(isDark: boolean): ColorPalette {
+export function getColors(isDark: boolean, provider?: 'claude' | 'codex'): ColorPalette {
+  if (provider === 'codex') {
+    return (isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette
+  }
   return isDark ? darkColors : lightColors
 }
 

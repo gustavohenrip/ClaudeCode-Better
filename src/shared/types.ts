@@ -1,3 +1,5 @@
+export type Provider = 'claude' | 'codex'
+
 // ─── Claude Code Stream Event Types (verified from v2.1.63) ───
 
 export interface InitEvent {
@@ -145,6 +147,7 @@ export interface Attachment {
 
 export interface TabState {
   id: string
+  provider: Provider
   claudeSessionId: string | null
   status: TabStatus
   activeRequestId: string | null
@@ -218,6 +221,7 @@ export type NormalizedEvent =
 export interface RunOptions {
   prompt: string
   projectPath: string
+  provider?: Provider
   sessionId?: string
   allowedTools?: string[]
   maxTurns?: number
@@ -339,6 +343,7 @@ export const IPC = {
   LOAD_SESSION: 'clui:load-session',
   RESOLVE_PROJECT_DIR: 'clui:resolve-project-dir',
   RESOLVE_SESSION_DIR: 'clui:resolve-session-dir',
+  CODEX_QUOTA: 'clui:codex-quota',
 
   // One-way events (main → renderer)
   TEXT_CHUNK: 'clui:text-chunk',
@@ -387,3 +392,13 @@ export const IPC = {
   RUN_COMPLETE: 'clui:run-complete',
   RUN_ERROR: 'clui:run-error',
 } as const
+
+export interface CodexQuota {
+  primaryUsedPercent: number
+  primaryWindowMinutes: number
+  primaryResetsAt: number
+  secondaryUsedPercent: number
+  secondaryWindowMinutes: number
+  secondaryResetsAt: number
+  planType: string
+}

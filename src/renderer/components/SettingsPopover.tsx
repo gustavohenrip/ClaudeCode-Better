@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning, Scroll, Plugs, Plus, X, Terminal, GlobeSimple, CaretLeft, Trash } from '@phosphor-icons/react'
+import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning, Scroll, Plugs, Plus, X, Terminal, GlobeSimple, CaretLeft, Trash, Robot } from '@phosphor-icons/react'
 import { useThemeStore, type EffortLevel } from '../theme'
 import { useSessionStore, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -94,6 +94,8 @@ export function SettingsPopover() {
   const setEffort = useThemeStore((s) => s.setEffort)
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
   const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
+  const defaultProvider = useThemeStore((s) => s.defaultProvider)
+  const setDefaultProvider = useThemeStore((s) => s.setDefaultProvider)
   const globalRules = useThemeStore((s) => s.globalRules)
   const rulesProfiles = useThemeStore((s) => s.rulesProfiles)
   const activeProfileId = useThemeStore((s) => s.activeProfileId)
@@ -105,6 +107,10 @@ export function SettingsPopover() {
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const supportsMaxEffort = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
+  const isCodex = useSessionStore((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    return tab?.provider === 'codex'
+  })
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
@@ -342,35 +348,74 @@ export function SettingsPopover() {
 
                 <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <Lightning size={14} style={{ color: colors.textTertiary }} />
-                    <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Effort</div>
+                <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Robot size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                        Default AI
+                      </div>
+                    </div>
+                    <SegmentedControl
+                      value={defaultProvider}
+                      onChange={(v) => setDefaultProvider(v as 'claude' | 'codex')}
+                      options={[
+                        { value: 'claude', label: 'Claude' },
+                        { value: 'codex', label: 'Codex' },
+                      ]}
+                      colors={colors}
+                    />
                   </div>
-                  <SegmentedControl
-                    value={effort === 'max' && !supportsMaxEffort ? 'high' : effort}
-                    onChange={(v) => setEffort(v as EffortLevel)}
-                    options={[
-                      { value: 'low', label: 'Low' },
-                      { value: 'medium', label: 'Medium' },
-                      { value: 'high', label: 'High' },
-                      ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
-                    ]}
-                    colors={colors}
-                  />
                 </div>
 
                 <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Brain size={14} style={{ color: colors.textTertiary }} />
-                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Thinking</div>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Lightning size={14} style={{ color: colors.textTertiary }} />
+                    <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                      {isCodex ? 'Reasoning' : 'Effort'}
                     </div>
-                    <RowToggle checked={thinkingEnabled} onChange={setThinkingEnabled} colors={colors} label="Toggle extended thinking" />
                   </div>
+                  <SegmentedControl
+                    value={isCodex
+                      ? (effort === 'max' ? 'max' : effort)
+                      : (effort === 'max' && !supportsMaxEffort ? 'high' : effort)
+                    }
+                    onChange={(v) => setEffort(v as EffortLevel)}
+                    options={isCodex
+                      ? [
+                          { value: 'low', label: 'Low' },
+                          { value: 'medium', label: 'Medium' },
+                          { value: 'high', label: 'High' },
+                          { value: 'max', label: 'Extra' },
+                        ]
+                      : [
+                          { value: 'low', label: 'Low' },
+                          { value: 'medium', label: 'Medium' },
+                          { value: 'high', label: 'High' },
+                          ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
+                        ]
+                    }
+                    colors={colors}
+                  />
                 </div>
+
+                {!isCodex && (
+                  <>
+                    <div style={{ height: 1, background: colors.popoverBorder }} />
+
+                    <div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Brain size={14} style={{ color: colors.textTertiary }} />
+                          <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Thinking</div>
+                        </div>
+                        <RowToggle checked={thinkingEnabled} onChange={setThinkingEnabled} colors={colors} label="Toggle extended thinking" />
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 

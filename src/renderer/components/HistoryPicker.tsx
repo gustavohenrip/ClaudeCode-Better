@@ -34,6 +34,10 @@ function projectLabel(projectDir: string): string {
 export function HistoryPicker() {
   const resumeSession = useSessionStore((s) => s.resumeSession)
   const isExpanded = useSessionStore((s) => s.isExpanded)
+  const activeProvider = useSessionStore((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    return tab?.provider || 'claude'
+  })
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
@@ -66,13 +70,13 @@ export function HistoryPicker() {
   const loadSessions = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await window.clui.listSessions()
+      const result = await window.clui.listSessions(undefined, activeProvider === 'codex' ? 'codex' : undefined)
       setSessions(result)
     } catch {
       setSessions([])
     }
     setLoading(false)
-  }, [])
+  }, [activeProvider])
 
   useEffect(() => {
     if (!open) return
@@ -100,7 +104,7 @@ export function HistoryPicker() {
     const title = session.firstMessage
       ? (session.firstMessage.length > 30 ? session.firstMessage.substring(0, 27) + '...' : session.firstMessage)
       : session.slug || 'Resumed'
-    void resumeSession(session.sessionId, title, session.cwd || undefined, session.projectDir)
+    void resumeSession(session.sessionId, title, session.cwd || undefined, session.projectDir, activeProvider)
   }
 
   const filtered = search.trim()

@@ -2,18 +2,70 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
+
+
+function ProviderToggle() {
+  const provider = useSessionStore((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    return tab?.provider || 'claude'
+  })
+  const switchProvider = useSessionStore((s) => s.switchProvider)
+  const tab = useActiveTab()
+  const colors = useColors()
+  const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
+
+  const [tooltip, setTooltip] = useState('')
+
+  useEffect(() => {
+    if (provider !== 'codex') {
+      setTooltip('Switch to Codex')
+      return
+    }
+    window.clui.codexQuota().then((q) => {
+      const pLeft = 100 - Math.round(q.primaryUsedPercent)
+      const sLeft = 100 - Math.round(q.secondaryUsedPercent)
+      setTooltip(`${q.planType} | 5h: ${pLeft}% left | 7d: ${sLeft}% left`)
+    }).catch(() => setTooltip('Switch to Claude'))
+  }, [provider, tab?.lastResult])
+
+  const isCodex = provider === 'codex'
+
+  return (
+    <motion.button
+      onClick={() => { if (!isBusy) switchProvider() }}
+      className="flex items-center gap-1 text-[10px] rounded-full px-2 py-0.5 transition-colors"
+      style={{
+        color: isCodex ? '#888888' : colors.accent,
+        fontWeight: 600,
+        cursor: isBusy ? 'not-allowed' : 'pointer',
+        background: isCodex ? 'rgba(136,136,136,0.08)' : 'rgba(217,119,87,0.08)',
+      }}
+      title={tooltip}
+      whileHover={{ scale: isBusy ? 1 : 1.05 }}
+      whileTap={{ scale: isBusy ? 1 : 0.95 }}
+    >
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%',
+        background: isCodex ? '#888888' : colors.accent,
+        display: 'inline-block',
+      }} />
+      {isCodex ? 'Codex' : 'Claude'}
+    </motion.button>
+  )
+}
 
 /* ─── Model Picker (inline — tightly coupled to StatusBar) ─── */
 
 function ModelPicker() {
-  const preferredModel = useSessionStore((s) => s.preferredModel)
+  const preferredClaudeModel = useSessionStore((s) => s.preferredModel)
+  const preferredCodexModel = useSessionStore((s) => s.preferredCodexModel)
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
   const tab = useSessionStore(
     (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b && a.status === b.status && a.sessionModel === b.sessionModel),
+    (a, b) => a === b || (!!a && !!b && a.status === b.status && a.sessionModel === b.sessionModel && a.provider === b.provider),
   )
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
@@ -24,6 +76,8 @@ function ModelPicker() {
   const [pos, setPos] = useState({ bottom: 0, left: 0 })
 
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
+  const isCodex = tab?.provider === 'codex'
+  const models = isCodex ? CODEX_MODELS : AVAILABLE_MODELS
 
   const updatePos = useCallback(() => {
     if (!triggerRef.current) return
@@ -52,10 +106,23 @@ function ModelPicker() {
     setOpen((o) => !o)
   }
 
+  const preferredModel = isCodex ? preferredCodexModel : preferredClaudeModel
+
   const activeLabel = (() => {
-    if (preferredModel) {
-      const m = AVAILABLE_MODELS.find((m) => m.id === preferredModel)
-      return m?.label || preferredModel
+    if (isCodex) {
+      if (preferredCodexModel) {
+        const m = CODEX_MODELS.find((m) => m.id === preferredCodexModel)
+        if (m) return m.label
+      }
+      if (tab?.sessionModel) {
+        const m = CODEX_MODELS.find((m) => m.id === tab.sessionModel)
+        return m?.label || tab.sessionModel
+      }
+      return CODEX_MODELS[2].label
+    }
+    if (preferredClaudeModel) {
+      const m = AVAILABLE_MODELS.find((m) => m.id === preferredClaudeModel)
+      return m?.label || preferredClaudeModel
     }
     if (tab?.sessionModel) {
       const m = AVAILABLE_MODELS.find((m) => m.id === tab.sessionModel)
@@ -102,9 +169,10 @@ function ModelPicker() {
             border: `1px solid ${colors.popoverBorder}`,
           }}
         >
-          <div className="py-1">
-            {AVAILABLE_MODELS.map((m) => {
-              const isSelected = preferredModel === m.id || (!preferredModel && m.id === AVAILABLE_MODELS[0].id)
+          <div className="py-1" style={{ maxHeight: 240, overflowY: 'auto' }}>
+            {models.map((m) => {
+              const defaultId = isCodex ? CODEX_MODELS[2].id : AVAILABLE_MODELS[0].id
+              const isSelected = preferredModel === m.id || (!preferredModel && m.id === defaultId)
               return (
                 <button
                   key={m.id}
@@ -381,7 +449,51 @@ function TokenBadge() {
 
 /* ─── StatusBar ─── */
 
-/** Get a compact display path: basename for deep paths, ~ for home */
+function ReasoningBadge() {
+  const effort = useThemeStore((s) => s.effort)
+  const setEffort = useThemeStore((s) => s.setEffort)
+  const colors = useColors()
+  const [pop, setPop] = useState(false)
+  const prevEffort = useRef(effort)
+
+  useEffect(() => {
+    if (effort !== prevEffort.current) {
+      prevEffort.current = effort
+      setPop(true)
+      const t = setTimeout(() => setPop(false), 300)
+      return () => clearTimeout(t)
+    }
+  }, [effort])
+
+  const cycle: EffortLevel[] = ['low', 'medium', 'high', 'max']
+
+  const handleClick = () => {
+    const idx = cycle.indexOf(effort)
+    const next = idx === -1 ? 0 : (idx + 1) % cycle.length
+    setEffort(cycle[next])
+  }
+
+  const labels: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', max: 'Extra High' }
+  const label = labels[effort] || 'Medium'
+  const isHigh = effort === 'high' || effort === 'max'
+  const reasonColor = effort === 'low' ? colors.textTertiary : effort === 'medium' ? colors.textTertiary : colors.accent
+
+  return (
+    <motion.button
+      onClick={handleClick}
+      className={`flex items-center gap-0.5 text-[10px] rounded-full px-1.5 py-0.5 transition-colors ${pop ? 'animate-badge-pop' : ''}`}
+      style={{ color: colors.textTertiary }}
+      title={`Reasoning: ${label} — click to cycle`}
+      whileTap={{ scale: 0.9 }}
+    >
+      <Brain size={10} weight={isHigh ? 'fill' : 'regular'} style={{ color: reasonColor }} />
+      <span style={{ color: reasonColor }}>
+        {label}
+      </span>
+    </motion.button>
+  )
+}
+
 function compactPath(fullPath: string): string {
   if (fullPath === '~') return '~'
   const parts = fullPath.replace(/\/$/, '').split('/')
@@ -393,6 +505,7 @@ export function StatusBar() {
     (s) => s.tabs.find((t) => t.id === s.activeTabId),
     (a, b) => a === b || (!!a && !!b
       && a.status === b.status
+      && a.provider === b.provider
       && a.additionalDirs === b.additionalDirs
       && a.hasChosenDirectory === b.hasChosenDirectory
       && a.workingDirectory === b.workingDirectory
@@ -462,7 +575,10 @@ export function StatusBar() {
     >
       {/* Left — directory + model picker */}
       <div className="flex items-center gap-2 text-[11px] min-w-0" style={{ color: colors.textTertiary }}>
-        {/* Directory button */}
+        <ProviderToggle />
+
+        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+
         <button
           ref={dirRef}
           onClick={handleDirClick}
@@ -568,11 +684,15 @@ export function StatusBar() {
 
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 
-        <EffortBadge />
-
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
-
-        <ThinkingBadge />
+        {tab.provider === 'codex' ? (
+          <ReasoningBadge />
+        ) : (
+          <>
+            <EffortBadge />
+            <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+            <ThinkingBadge />
+          </>
+        )}
 
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 

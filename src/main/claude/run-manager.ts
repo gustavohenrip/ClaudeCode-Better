@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import { StreamParser } from '../stream-parser'
-import { normalize } from './event-normalizer'
+import { normalize, normalizeCodex } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
@@ -75,6 +75,7 @@ export interface RunHandle {
   permissionDenials: Array<{ tool_name: string; tool_use_id: string }>
   keepAlive: boolean
   model?: string
+  codexTextLengths: Map<string, number>
 }
 
 /**
@@ -89,14 +90,16 @@ export interface RunHandle {
  */
 export class RunManager extends EventEmitter {
   private activeRuns = new Map<string, RunHandle>()
-  /** Holds recently-finished runs so diagnostics survive past process exit */
   private _finishedRuns = new Map<string, RunHandle>()
   private claudeBinary: string
+  private codexBinary: string
 
   constructor() {
     super()
     this.claudeBinary = this._findClaudeBinary()
+    this.codexBinary = this._findCodexBinary()
     log(`Claude binary: ${this.claudeBinary}`)
+    log(`Codex binary: ${this.codexBinary}`)
   }
 
   private _findClaudeBinary(): string {
@@ -124,9 +127,35 @@ export class RunManager extends EventEmitter {
     return 'claude'
   }
 
-  private _getEnv(): NodeJS.ProcessEnv {
+  private _findCodexBinary(): string {
+    const candidates = [
+      '/usr/local/bin/codex',
+      '/opt/homebrew/bin/codex',
+      join(homedir(), '.npm-global/bin/codex'),
+    ]
+
+    for (const c of candidates) {
+      try {
+        execSync(`test -x "${c}"`, { stdio: 'ignore' })
+        return c
+      } catch {}
+    }
+
+    try {
+      return execSync('/bin/zsh -ilc "whence -p codex"', { encoding: 'utf-8', env: getCliEnv() }).trim()
+    } catch {}
+
+    try {
+      return execSync('/bin/bash -lc "which codex"', { encoding: 'utf-8', env: getCliEnv() }).trim()
+    } catch {}
+
+    return 'codex'
+  }
+
+  private _getEnv(provider?: string): NodeJS.ProcessEnv {
     const env = getCliEnv()
-    const binDir = this.claudeBinary.substring(0, this.claudeBinary.lastIndexOf('/'))
+    const binary = provider === 'codex' ? this.codexBinary : this.claudeBinary
+    const binDir = binary.substring(0, binary.lastIndexOf('/'))
     if (env.PATH && !env.PATH.includes(binDir)) {
       env.PATH = `${binDir}:${env.PATH}`
     }
@@ -201,82 +230,106 @@ export class RunManager extends EventEmitter {
   }
 
   startRun(requestId: string, options: RunOptions, flags?: { keepAlive?: boolean; skipPrompt?: boolean }): RunHandle {
+    const isCodex = options.provider === 'codex'
+    const binary = isCodex ? this.codexBinary : this.claudeBinary
+
     let cwd = options.projectPath === '~' ? homedir() : options.projectPath
     const hasExplicitPath = typeof options.projectPath === 'string' && options.projectPath.trim() !== '' && options.projectPath !== '~'
-    if (options.sessionId && !hasExplicitPath) {
+    if (options.sessionId && !hasExplicitPath && !isCodex) {
       const sessionCwd = this._resolveSessionCwd(options.sessionId)
       if (sessionCwd) cwd = sessionCwd
     }
 
-    const args: string[] = [
-      '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--include-partial-messages',
-      '--permission-mode', options.cliPermissionMode || 'default',
-    ]
+    let args: string[]
 
-    if (options.sessionId) {
-      args.push('--resume', options.sessionId)
-    }
-    if (options.model) {
-      args.push('--model', options.model)
-    }
-    if (options.effort) {
-      args.push('--effort', options.effort)
-    }
-    if (options.thinking) {
-      args.push('--thinking', options.thinking)
-    }
-    if (options.addDirs && options.addDirs.length > 0) {
-      for (const dir of options.addDirs) {
-        args.push('--add-dir', dir)
+    if (isCodex) {
+      if (options.sessionId) {
+        args = ['exec', 'resume', options.sessionId, '-', '--json']
+      } else {
+        args = ['exec', '--json', '-']
       }
-    }
-
-    if (options.hookSettingsPath) {
-      // CLUI-scoped hook settings: the PreToolUse HTTP hook handles permissions
-      // for dangerous tools (Bash, Edit, Write, MultiEdit).
-      // Auto-approve safe tools so they don't trigger the permission card.
-      args.push('--settings', options.hookSettingsPath)
-      const safeAllowed = [
-        ...SAFE_TOOLS,
-        ...(options.allowedTools || []),
-      ]
-      args.push('--allowedTools', safeAllowed.join(','))
+      if (options.model) {
+        args.push('-m', options.model)
+      }
+      if (options.cliPermissionMode === 'bypassPermissions') {
+        args.push('--dangerously-bypass-approvals-and-sandbox')
+      } else {
+        args.push('--full-auto')
+      }
+      if (options.addDirs && options.addDirs.length > 0) {
+        for (const dir of options.addDirs) {
+          args.push('--add-dir', dir)
+        }
+      }
+      if (options.effort) {
+        const codexEffort = options.effort === 'max' ? 'xhigh' : options.effort
+        args.push('-c', `model_reasoning_effort="${codexEffort}"`)
+      }
+      args.push('-c', 'model_reasoning_summary="auto"')
+      args.push('-c', 'hide_agent_reasoning=false')
     } else {
-      // Fallback: no hook server available.
-      // Pre-approve common tools so they run without being silently denied.
-      const allAllowed = [
-        ...DEFAULT_ALLOWED_TOOLS,
-        ...(options.allowedTools || []),
+      args = [
+        '-p',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--permission-mode', options.cliPermissionMode || 'default',
       ]
-      args.push('--allowedTools', allAllowed.join(','))
+      if (options.sessionId) {
+        args.push('--resume', options.sessionId)
+      }
+      if (options.model) {
+        args.push('--model', options.model)
+      }
+      if (options.effort) {
+        args.push('--effort', options.effort)
+      }
+      if (options.thinking) {
+        args.push('--thinking', options.thinking)
+      }
+      if (options.addDirs && options.addDirs.length > 0) {
+        for (const dir of options.addDirs) {
+          args.push('--add-dir', dir)
+        }
+      }
+      if (options.hookSettingsPath) {
+        args.push('--settings', options.hookSettingsPath)
+        const safeAllowed = [
+          ...SAFE_TOOLS,
+          ...(options.allowedTools || []),
+        ]
+        args.push('--allowedTools', safeAllowed.join(','))
+      } else {
+        const allAllowed = [
+          ...DEFAULT_ALLOWED_TOOLS,
+          ...(options.allowedTools || []),
+        ]
+        args.push('--allowedTools', allAllowed.join(','))
+      }
+      if (options.maxTurns) {
+        args.push('--max-turns', String(options.maxTurns))
+      }
+      if (options.maxBudgetUsd) {
+        args.push('--max-budget-usd', String(options.maxBudgetUsd))
+      }
+      if (options.systemPrompt) {
+        args.push('--system-prompt', options.systemPrompt)
+      }
+      args.push('--append-system-prompt', CLUI_SYSTEM_HINT)
     }
-    if (options.maxTurns) {
-      args.push('--max-turns', String(options.maxTurns))
-    }
-    if (options.maxBudgetUsd) {
-      args.push('--max-budget-usd', String(options.maxBudgetUsd))
-    }
-    if (options.systemPrompt) {
-      args.push('--system-prompt', options.systemPrompt)
-    }
-    // Always tell Claude it's inside CLUI (additive, doesn't replace base prompt)
-    args.push('--append-system-prompt', CLUI_SYSTEM_HINT)
 
     if (DEBUG) {
-      log(`Starting run ${requestId}: ${this.claudeBinary} ${args.join(' ')}`)
+      log(`Starting run ${requestId}: ${binary} ${args.join(' ')}`)
       log(`Prompt: ${options.prompt.substring(0, 200)}`)
     } else {
-      log(`Starting run ${requestId}`)
+      log(`Starting run ${requestId} [${isCodex ? 'codex' : 'claude'}]`)
     }
 
-    const child = spawn(this.claudeBinary, args, {
+    const child = spawn(binary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
-      env: this._getEnv(),
+      env: this._getEnv(options.provider),
     })
 
     log(`Spawned PID: ${child.pid}`)
@@ -294,29 +347,37 @@ export class RunManager extends EventEmitter {
       permissionDenials: [],
       keepAlive: flags?.keepAlive ?? false,
       model: options.model,
+      codexTextLengths: new Map(),
     }
 
     // ─── stdout → NDJSON parser → normalizer → events ───
     const parser = StreamParser.fromStream(child.stdout!)
 
     parser.on('event', (raw: ClaudeEvent) => {
-      if (raw.type === 'system' && 'subtype' in raw && raw.subtype === 'init') {
-        handle.sessionId = (raw as any).session_id
-      }
+      if (isCodex) {
+        const r = raw as any
+        if (r.type === 'thread.started' && r.thread_id) {
+          handle.sessionId = r.thread_id
+        }
+      } else {
+        if (raw.type === 'system' && 'subtype' in raw && raw.subtype === 'init') {
+          handle.sessionId = (raw as any).session_id
+        }
 
-      if (raw.type === 'permission_request' || (raw.type === 'system' && 'subtype' in raw && (raw as any).subtype === 'permission_request')) {
-        handle.sawPermissionRequest = true
-        log(`Permission request seen [${handle.runId}]`)
-      }
+        if (raw.type === 'permission_request' || (raw.type === 'system' && 'subtype' in raw && (raw as any).subtype === 'permission_request')) {
+          handle.sawPermissionRequest = true
+          log(`Permission request seen [${handle.runId}]`)
+        }
 
-      if (raw.type === 'result') {
-        const denials = (raw as any).permission_denials
-        if (Array.isArray(denials) && denials.length > 0) {
-          handle.permissionDenials = denials.map((d: any) => ({
-            tool_name: d.tool_name || '',
-            tool_use_id: d.tool_use_id || '',
-          }))
-          log(`Permission denials [${handle.runId}]: ${JSON.stringify(handle.permissionDenials)}`)
+        if (raw.type === 'result') {
+          const denials = (raw as any).permission_denials
+          if (Array.isArray(denials) && denials.length > 0) {
+            handle.permissionDenials = denials.map((d: any) => ({
+              tool_name: d.tool_name || '',
+              tool_use_id: d.tool_use_id || '',
+            }))
+            log(`Permission denials [${handle.runId}]: ${JSON.stringify(handle.permissionDenials)}`)
+          }
         }
       }
 
@@ -324,13 +385,30 @@ export class RunManager extends EventEmitter {
 
       this.emit('raw', handle.runId, raw)
 
-      const normalized = normalize(raw)
+      const normalized = isCodex ? normalizeCodex(raw) : normalize(raw)
       for (const evt of normalized) {
         if (evt.type === 'tool_call') handle.toolCallCount++
+        if (isCodex && evt.type === 'text_chunk') {
+          const r = raw as any
+          const itemId = r.item?.id || '_default'
+          const prevLen = handle.codexTextLengths.get(itemId) || 0
+          const fullText = r.item?.text || ''
+          if (fullText.length > prevLen) {
+            handle.codexTextLengths.set(itemId, fullText.length)
+            this.emit('normalized', handle.runId, { type: 'text_chunk', text: fullText.substring(prevLen) })
+          }
+          continue
+        }
         this.emit('normalized', handle.runId, evt)
       }
 
-      if (raw.type === 'result') {
+      if (isCodex) {
+        const r = raw as any
+        if (r.type === 'turn.completed' || r.type === 'turn.failed') {
+          log(`Codex run complete [${handle.runId}]: type=${r.type}`)
+          try { child.stdin?.end() } catch {}
+        }
+      } else if (raw.type === 'result') {
         const r = raw as any
         log(`Run complete [${handle.runId}]: is_error=${r.is_error} result=${(r.result || '').substring(0, 300)} sawPerm=${handle.sawPermissionRequest} denials=${handle.permissionDenials.length}`)
         if (!handle.keepAlive || r.is_error) {
@@ -372,14 +450,19 @@ export class RunManager extends EventEmitter {
     })
 
     if (!flags?.skipPrompt) {
-      const userMessage = JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{ type: 'text', text: options.prompt }],
-        },
-      })
-      child.stdin!.write(userMessage + '\n')
+      if (isCodex) {
+        child.stdin!.write(options.prompt)
+        child.stdin!.end()
+      } else {
+        const userMessage = JSON.stringify({
+          type: 'user',
+          message: {
+            role: 'user',
+            content: [{ type: 'text', text: options.prompt }],
+          },
+        })
+        child.stdin!.write(userMessage + '\n')
+      }
     }
 
     this.activeRuns.set(requestId, handle)

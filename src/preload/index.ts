@@ -1,11 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage } from '../shared/types'
+import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, CodexQuota } from '../shared/types'
 
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
   start(): Promise<{ version: string; auth: { email?: string; subscriptionType?: string; authMethod?: string }; mcpServers: string[]; projectPath: string; homePath: string }>
-  createTab(): Promise<{ tabId: string }>
+  createTab(provider?: string): Promise<{ tabId: string }>
   prompt(tabId: string, requestId: string, options: RunOptions): Promise<void>
   cancel(requestId: string): Promise<boolean>
   stopTab(tabId: string): Promise<boolean>
@@ -25,10 +25,11 @@ export interface CluiAPI {
   respondPermission(tabId: string, questionId: string, optionId: string): Promise<boolean>
   initSession(tabId: string, systemPrompt?: string): void
   resetTabSession(tabId: string): void
-  listSessions(projectPath?: string): Promise<SessionMeta[]>
+  listSessions(projectPath?: string, provider?: string): Promise<SessionMeta[]>
   loadSession(sessionId: string, projectPath?: string, projectDir?: string): Promise<SessionLoadMessage[]>
   resolveProjectDir(projectDir: string): Promise<string>
   resolveSessionDir(sessionId: string): Promise<string>
+  codexQuota(): Promise<CodexQuota>
   fetchMarketplace(forceRefresh?: boolean): Promise<{ plugins: CatalogPlugin[]; error: string | null }>
   listInstalledPlugins(): Promise<string[]>
   installPlugin(repo: string, pluginName: string, marketplace: string, sourcePath?: string, isSkillMd?: boolean): Promise<{ ok: boolean; error?: string }>
@@ -53,6 +54,7 @@ export interface CluiAPI {
   onTabStatusChange(callback: (tabId: string, newStatus: string, oldStatus: string) => void): () => void
   onError(callback: (tabId: string, error: EnrichedError) => void): () => void
   onSkillStatus(callback: (status: { name: string; state: string; error?: string; reason?: string }) => void): () => void
+  onCodexQuotaUpdate(callback: (quota: CodexQuota) => void): () => void
   onWindowShown(callback: () => void): () => void
   onWindowWillHide(callback: () => void): () => void
   notifyNative(payload: { title: string; body: string }): void
@@ -61,7 +63,7 @@ export interface CluiAPI {
 const api: CluiAPI = {
   // ─── Request-response ───
   start: () => ipcRenderer.invoke(IPC.START),
-  createTab: () => ipcRenderer.invoke(IPC.CREATE_TAB),
+  createTab: (provider?: string) => ipcRenderer.invoke(IPC.CREATE_TAB, provider),
   prompt: (tabId, requestId, options) => ipcRenderer.invoke(IPC.PROMPT, { tabId, requestId, options }),
   cancel: (requestId) => ipcRenderer.invoke(IPC.CANCEL, requestId),
   stopTab: (tabId) => ipcRenderer.invoke(IPC.STOP_TAB, tabId),
@@ -82,10 +84,11 @@ const api: CluiAPI = {
     ipcRenderer.invoke(IPC.RESPOND_PERMISSION, { tabId, questionId, optionId }),
   initSession: (tabId, systemPrompt) => ipcRenderer.send(IPC.INIT_SESSION, tabId, systemPrompt),
   resetTabSession: (tabId) => ipcRenderer.send(IPC.RESET_TAB_SESSION, tabId),
-  listSessions: (projectPath?: string) => ipcRenderer.invoke(IPC.LIST_SESSIONS, projectPath),
+  listSessions: (projectPath?: string, provider?: string) => ipcRenderer.invoke(IPC.LIST_SESSIONS, projectPath, provider),
   loadSession: (sessionId: string, projectPath?: string, projectDir?: string) => ipcRenderer.invoke(IPC.LOAD_SESSION, { sessionId, projectPath, projectDir }),
   resolveProjectDir: (projectDir: string) => ipcRenderer.invoke(IPC.RESOLVE_PROJECT_DIR, projectDir),
   resolveSessionDir: (sessionId: string) => ipcRenderer.invoke(IPC.RESOLVE_SESSION_DIR, sessionId),
+  codexQuota: () => ipcRenderer.invoke(IPC.CODEX_QUOTA),
   fetchMarketplace: (forceRefresh) => ipcRenderer.invoke(IPC.MARKETPLACE_FETCH, { forceRefresh }),
   listInstalledPlugins: () => ipcRenderer.invoke(IPC.MARKETPLACE_INSTALLED),
   installPlugin: (repo, pluginName, marketplace, sourcePath, isSkillMd) =>
@@ -143,6 +146,12 @@ const api: CluiAPI = {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => callback(status)
     ipcRenderer.on(IPC.SKILL_STATUS, handler)
     return () => ipcRenderer.removeListener(IPC.SKILL_STATUS, handler)
+  },
+
+  onCodexQuotaUpdate: (callback: (quota: CodexQuota) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, quota: CodexQuota) => callback(quota)
+    ipcRenderer.on('clui:codex-quota-update', handler)
+    return () => ipcRenderer.removeListener('clui:codex-quota-update', handler)
   },
 
   onWindowShown: (callback) => {

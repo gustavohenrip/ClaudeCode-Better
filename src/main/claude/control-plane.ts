@@ -745,10 +745,20 @@ export class ControlPlane extends EventEmitter {
     const tab = this.tabs.get(tabId)
     if (!tab) throw new Error(`Tab ${tabId} disappeared`)
 
+    const isCodex = options.provider === 'codex'
     const warm = this.warmHandles.get(tabId)
     const hasSessionToResume = !!(options.sessionId || tab.claudeSessionId)
 
-    if (warm && hasSessionToResume) {
+    if (warm && isCodex) {
+      this.warmHandles.delete(tabId)
+      this.initRequestIds.delete(warm.requestId)
+      this.runManager.cancel(warm.requestId)
+      const rt = this.runTokens.get(warm.requestId)
+      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
+      log(`Cancelled warm process for tab ${tabId.substring(0, 8)}… — switching to Codex`)
+    }
+
+    if (warm && !isCodex && hasSessionToResume) {
       this.warmHandles.delete(tabId)
       this.initRequestIds.delete(warm.requestId)
       this.runManager.cancel(warm.requestId)
@@ -757,7 +767,7 @@ export class ControlPlane extends EventEmitter {
       log(`Cancelled warm process for tab ${tabId.substring(0, 8)}… — resuming session`)
     }
 
-    if (warm && !hasSessionToResume) {
+    if (warm && !isCodex && !hasSessionToResume) {
       this.warmHandles.delete(tabId)
       this.initRequestIds.delete(warm.requestId)
 
@@ -843,7 +853,7 @@ export class ControlPlane extends EventEmitter {
         this.ptyRuns.add(requestId)
         pid = handle.pid
       } else {
-        const handle = this.runManager.startRun(requestId, options, { keepAlive: true })
+        const handle = this.runManager.startRun(requestId, options, { keepAlive: !isCodex })
         pid = handle.pid
       }
       tab.runPid = pid

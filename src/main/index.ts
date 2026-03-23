@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard, Notification } from 'electron'
 import { join, resolve, dirname, isAbsolute } from 'path'
-import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync, watch as fsWatch, type FSWatcher } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { createInterface } from 'readline'
@@ -33,7 +33,7 @@ const controlPlane = new ControlPlane(INTERACTIVE_PTY)
 
 // Keep native width fixed to avoid renderer animation vs setBounds race.
 // The UI itself still launches in compact mode; extra width is transparent/click-through.
-const BAR_WIDTH = 1040
+const BAR_WIDTH = 1260
 const PILL_HEIGHT = 720  // Fixed native window height — extra room for expanded UI + shadow buffers
 const PILL_BOTTOM_MARGIN = 24
 
@@ -130,11 +130,34 @@ function scheduleToggleSnapshots(toggleId: number, phase: 'show' | 'hide'): void
 // ─── Wire ControlPlane events → renderer ───
 
 controlPlane.on('event', (tabId: string, event: NormalizedEvent) => {
+  const evt = event as any
+  if (evt.type === 'codex_rate_limits' && evt.rateLimits) {
+    const rl = evt.rateLimits
+    const p = rl.primary || {}
+    const s = rl.secondary || {}
+    cachedCodexQuota = {
+      primaryUsedPercent: p.used_percent ?? 0,
+      primaryWindowMinutes: p.window_minutes ?? 300,
+      primaryResetsAt: p.resets_at ?? 0,
+      secondaryUsedPercent: s.used_percent ?? 0,
+      secondaryWindowMinutes: s.window_minutes ?? 10080,
+      secondaryResetsAt: s.resets_at ?? 0,
+      planType: rl.plan_type || 'unknown',
+    }
+    broadcast('clui:codex-quota-update', cachedCodexQuota)
+    return
+  }
   broadcast('clui:normalized-event', tabId, event)
 })
 
 controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatus: string) => {
   broadcast('clui:tab-status-change', tabId, newStatus, oldStatus)
+  if (newStatus === 'completed' && oldStatus === 'running') {
+    setTimeout(() => {
+      const fresh = refreshCodexQuota()
+      broadcast('clui:codex-quota-update', fresh)
+    }, 500)
+  }
 })
 
 controlPlane.on('error', (tabId: string, error: EnrichedError) => {
@@ -352,10 +375,162 @@ ipcMain.handle(IPC.START, async () => {
   }
 })
 
-ipcMain.handle(IPC.CREATE_TAB, () => {
+const tabProviders = new Map<string, string>()
+
+ipcMain.handle(IPC.CREATE_TAB, (_event, provider?: string) => {
   const tabId = controlPlane.createTab()
-  log(`IPC CREATE_TAB → ${tabId}`)
+  if (provider) tabProviders.set(tabId, provider)
+  log(`IPC CREATE_TAB → ${tabId} [${provider || 'claude'}]`)
   return { tabId }
+})
+
+let cachedCodexQuota: import('../shared/types').CodexQuota | null = null
+let quotaWatchers: FSWatcher[] = []
+let quotaWatchedDirs = new Set<string>()
+let quotaWatchDebounce: ReturnType<typeof setTimeout> | null = null
+
+const QUOTA_FALLBACK: import('../shared/types').CodexQuota = {
+  primaryUsedPercent: 0, primaryWindowMinutes: 300, primaryResetsAt: 0,
+  secondaryUsedPercent: 0, secondaryWindowMinutes: 10080, secondaryResetsAt: 0,
+  planType: 'unknown',
+}
+
+let quotaPingInFlight = false
+
+function applyQuotaResets(q: import('../shared/types').CodexQuota): import('../shared/types').CodexQuota {
+  const nowSec = Math.floor(Date.now() / 1000)
+  let stale = false
+  if (q.primaryResetsAt && q.primaryResetsAt < nowSec) {
+    q.primaryUsedPercent = 0
+    stale = true
+  }
+  if (q.secondaryResetsAt && q.secondaryResetsAt < nowSec) {
+    q.secondaryUsedPercent = 0
+    stale = true
+  }
+  if (stale && !quotaPingInFlight) {
+    quotaPingInFlight = true
+    pingCodexForQuota()
+  }
+  return q
+}
+
+function findCodexBin(): string {
+  const candidates = ['/opt/homebrew/bin/codex', '/usr/local/bin/codex', join(homedir(), '.npm-global/bin/codex')]
+  for (const c of candidates) { try { if (existsSync(c)) return c } catch {} }
+  return 'codex'
+}
+
+function pingCodexForQuota(): void {
+  const codexBin = findCodexBin()
+  const { spawn: spawnChild } = require('child_process')
+  const child = spawnChild(codexBin, ['exec', '--json', '--full-auto', '-'], {
+    stdio: ['pipe', 'pipe', 'ignore'],
+    env: { ...process.env, PATH: `${dirname(codexBin)}:${process.env.PATH || ''}` },
+  })
+  child.stdin.write('hi')
+  child.stdin.end()
+  child.on('close', () => {
+    quotaPingInFlight = false
+    setTimeout(() => {
+      const fresh = refreshCodexQuota()
+      broadcast('clui:codex-quota-update', fresh)
+    }, 300)
+  })
+  child.on('error', () => { quotaPingInFlight = false })
+  setTimeout(() => { try { child.kill() } catch {} }, 15000)
+}
+
+function refreshCodexQuota(): import('../shared/types').CodexQuota {
+  try {
+    const sessionsBase = join(homedir(), '.codex', 'sessions')
+    if (!existsSync(sessionsBase)) return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+    const now = new Date()
+    const candidates: string[] = []
+    for (let d = 0; d < 3; d++) {
+      const date = new Date(now)
+      date.setDate(date.getDate() - d)
+      const ymd = date.toISOString().slice(0, 10).split('-')
+      const dir = join(sessionsBase, ymd[0], ymd[1], ymd[2])
+      if (existsSync(dir)) {
+        const files = readdirSync(dir).filter((f: string) => f.endsWith('.jsonl')).map((f: string) => join(dir, f))
+        candidates.push(...files)
+        setupQuotaWatcher(dir)
+      }
+    }
+    if (candidates.length === 0) return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+    candidates.sort((a, b) => {
+      try { return statSync(b).mtimeMs - statSync(a).mtimeMs } catch { return 0 }
+    })
+    for (const file of candidates.slice(0, 5)) {
+      const result = extractRateLimitsFromRollout(file)
+      if (result) {
+        cachedCodexQuota = applyQuotaResets(result)
+        return cachedCodexQuota
+      }
+    }
+    return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+  } catch {
+    return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+  }
+}
+
+function extractRateLimitsFromRollout(filePath: string): import('../shared/types').CodexQuota | null {
+  try {
+    const content = readFileSync(filePath, 'utf-8')
+    const lines = content.split('\n').filter((l: string) => l.trim())
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const obj = JSON.parse(lines[i])
+        const payload = obj.payload || obj
+        if (payload.type === 'token_count' && payload.rate_limits) {
+          const rl = payload.rate_limits
+          const p = rl.primary || {}
+          const s = rl.secondary || {}
+          return {
+            primaryUsedPercent: p.used_percent ?? 0,
+            primaryWindowMinutes: p.window_minutes ?? 300,
+            primaryResetsAt: p.resets_at ?? 0,
+            secondaryUsedPercent: s.used_percent ?? 0,
+            secondaryWindowMinutes: s.window_minutes ?? 10080,
+            secondaryResetsAt: s.resets_at ?? 0,
+            planType: rl.plan_type || 'unknown',
+          }
+        }
+      } catch {}
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function setupQuotaWatcher(dir: string): void {
+  if (quotaWatchedDirs.has(dir)) return
+  quotaWatchedDirs.add(dir)
+  try {
+    const watcher = fsWatch(dir, { persistent: false }, () => {
+      if (quotaWatchDebounce) clearTimeout(quotaWatchDebounce)
+      quotaWatchDebounce = setTimeout(() => {
+        const prev = cachedCodexQuota
+        const fresh = refreshCodexQuota()
+        if (!prev || fresh.primaryUsedPercent !== prev.primaryUsedPercent || fresh.secondaryUsedPercent !== prev.secondaryUsedPercent) {
+          broadcast('clui:codex-quota-update', fresh)
+        }
+      }, 300)
+    })
+    quotaWatchers.push(watcher)
+  } catch {}
+}
+
+function cleanupQuotaWatchers(): void {
+  for (const w of quotaWatchers) { try { w.close() } catch {} }
+  quotaWatchers = []
+  quotaWatchedDirs.clear()
+}
+
+ipcMain.handle(IPC.CODEX_QUOTA, () => {
+  return refreshCodexQuota()
 })
 
 ipcMain.on(IPC.INIT_SESSION, (_event, tabId: string, systemPrompt?: string) => {
@@ -421,6 +596,7 @@ ipcMain.handle(IPC.TAB_HEALTH, () => {
 
 ipcMain.handle(IPC.CLOSE_TAB, (_event, tabId: string) => {
   log(`IPC CLOSE_TAB: ${tabId}`)
+  tabProviders.delete(tabId)
   controlPlane.closeTab(tabId)
 })
 
@@ -438,7 +614,122 @@ ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }:
   return controlPlane.respondToPermission(tabId, questionId, optionId)
 })
 
-ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
+function extractCodexUserMessage(title: string, firstMsg: string): string {
+  const raw = title || firstMsg || ''
+  const claudeIdx = raw.lastIndexOf('Claude: ')
+  if (claudeIdx !== -1) {
+    const afterClaude = raw.substring(claudeIdx + 8).trim()
+    const endMarkers = ['\nCodex:', '\n\n[FIM', '\nClaude:']
+    let end = afterClaude.length
+    for (const m of endMarkers) {
+      const idx = afterClaude.indexOf(m)
+      if (idx !== -1 && idx < end) end = idx
+    }
+    const extracted = afterClaude.substring(0, end).trim()
+    if (extracted.length > 5) return extracted.substring(0, 100)
+  }
+  if (firstMsg && firstMsg.length < 300) return firstMsg.substring(0, 100)
+  if (title && title.length < 300) return title.substring(0, 100)
+  return ''
+}
+
+function extractFirstUserMsg(rolloutPath: string): { msg: string; cwd: string; ts: string } | null {
+  try {
+    const content = readFileSync(rolloutPath, 'utf-8')
+    const lines = content.split('\n')
+    let cwd = ''
+    let ts = ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const obj = JSON.parse(line)
+        if (!ts && obj.timestamp) ts = obj.timestamp
+        if (obj.type === 'session_meta' && obj.payload?.cwd) cwd = obj.payload.cwd
+        if (obj.type === 'response_item' && obj.payload?.role === 'user') {
+          const blocks = obj.payload.content || []
+          for (const b of blocks) {
+            if (b.type === 'input_text' && b.text) {
+              const t = b.text.trim()
+              if (t.length > 0 && t.length < 500 && !t.startsWith('<') && !t.startsWith('#')) {
+                return { msg: t.substring(0, 100), cwd, ts: ts || new Date().toISOString() }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+    return null
+  } catch { return null }
+}
+
+async function listCodexSessions(): Promise<Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number; projectDir: string; cwd: string | null }>> {
+  try {
+    const sessionsBase = join(homedir(), '.codex', 'sessions')
+    if (!existsSync(sessionsBase)) return []
+
+    const dbIds = new Set<string>()
+    const dbPath = join(homedir(), '.codex', 'state_5.sqlite')
+    if (existsSync(dbPath)) {
+      try {
+        const { stdout } = await execFileAsync('sqlite3', ['-json', dbPath, `SELECT id FROM threads WHERE archived=0;`])
+        const rows = JSON.parse(stdout || '[]')
+        for (const r of rows) dbIds.add(r.id)
+      } catch {}
+    }
+
+    const now = new Date()
+    const rolloutFiles: { path: string; mtime: number }[] = []
+    for (let d = 0; d < 14; d++) {
+      const date = new Date(now)
+      date.setDate(date.getDate() - d)
+      const ymd = date.toISOString().slice(0, 10).split('-')
+      const dir = join(sessionsBase, ymd[0], ymd[1], ymd[2])
+      if (existsSync(dir)) {
+        const files = readdirSync(dir).filter((f: string) => f.startsWith('rollout-') && f.endsWith('.jsonl'))
+        for (const f of files) {
+          const fp = join(dir, f)
+          try { rolloutFiles.push({ path: fp, mtime: statSync(fp).mtimeMs }) } catch {}
+        }
+      }
+    }
+    rolloutFiles.sort((a, b) => b.mtime - a.mtime)
+
+    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number; projectDir: string; cwd: string | null }> = []
+
+    for (const rf of rolloutFiles.slice(0, 50)) {
+      const fname = rf.path.split('/').pop() || ''
+      const idMatch = fname.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)
+      if (!idMatch) continue
+      const sid = idMatch[1]
+      if (dbIds.has(sid)) continue
+
+      const info = extractFirstUserMsg(rf.path)
+      if (!info || !info.msg) continue
+
+      const cwdParts = (info.cwd || '').replace(/\//g, '-')
+      sessions.push({
+        sessionId: sid,
+        slug: null,
+        firstMessage: info.msg,
+        lastTimestamp: new Date(rf.mtime).toISOString(),
+        size: Math.round(statSync(rf.path).size),
+        projectDir: cwdParts.startsWith('-') ? cwdParts : `-${cwdParts}`,
+        cwd: info.cwd || null,
+      })
+    }
+
+    sessions.sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime())
+    return sessions
+  } catch (err) {
+    log(`listCodexSessions error: ${err}`)
+    return []
+  }
+}
+
+ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string, provider?: string) => {
+  if (provider === 'codex') {
+    return listCodexSessions()
+  }
   log(`IPC LIST_SESSIONS ${projectPath ? `(path=${projectPath})` : '(all)'}`)
   try {
     const projectsRoot = join(homedir(), '.claude', 'projects')
@@ -520,7 +811,90 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
   }
 })
 
-// Load conversation history from a session's JSONL file
+function findCodexRollout(sessionId: string): string | null {
+  try {
+    const dbPath = join(homedir(), '.codex', 'state_5.sqlite')
+    if (existsSync(dbPath)) {
+      const { stdout } = require('child_process').execFileSync('sqlite3', [
+        '-json', dbPath,
+        `SELECT rollout_path FROM threads WHERE id='${sessionId.replace(/'/g, "''")}' LIMIT 1;`,
+      ], { encoding: 'utf-8' })
+      const rows = JSON.parse(stdout || '[]')
+      if (rows.length > 0 && rows[0].rollout_path && existsSync(rows[0].rollout_path)) {
+        return rows[0].rollout_path
+      }
+    }
+  } catch {}
+  try {
+    const sessionsBase = join(homedir(), '.codex', 'sessions')
+    if (!existsSync(sessionsBase)) return null
+    const now = new Date()
+    for (let d = 0; d < 30; d++) {
+      const date = new Date(now)
+      date.setDate(date.getDate() - d)
+      const ymd = date.toISOString().slice(0, 10).split('-')
+      const dir = join(sessionsBase, ymd[0], ymd[1], ymd[2])
+      if (!existsSync(dir)) continue
+      const files = readdirSync(dir).filter((f: string) => f.includes(sessionId))
+      if (files.length > 0) return join(dir, files[0])
+    }
+  } catch {}
+  return null
+}
+
+async function loadCodexSession(sessionId: string): Promise<Array<{ role: string; content: string; toolName?: string; toolInput?: string; timestamp: number }> | null> {
+  try {
+    const rolloutPath = findCodexRollout(sessionId)
+    if (!rolloutPath) return null
+
+    const messages: Array<{ role: string; content: string; toolName?: string; toolInput?: string; timestamp: number }> = []
+    const seenUserTexts = new Set<string>()
+
+    await new Promise<void>((res) => {
+      const rl = createInterface({ input: createReadStream(rolloutPath) })
+      rl.on('line', (line: string) => {
+        try {
+          const obj = JSON.parse(line)
+          if (obj.type !== 'response_item' || !obj.payload) return
+          const p = obj.payload
+          const ts = obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+
+          if (p.role === 'user' && Array.isArray(p.content)) {
+            for (const block of p.content) {
+              if (block.type === 'input_text' && block.text) {
+                const trimmed = block.text.trim()
+                if (trimmed.length > 500 || trimmed.startsWith('<') || trimmed.startsWith('#')) continue
+                if (seenUserTexts.has(trimmed)) continue
+                seenUserTexts.add(trimmed)
+                messages.push({ role: 'user', content: trimmed, timestamp: ts })
+              }
+            }
+          } else if (p.role === 'assistant' && Array.isArray(p.content)) {
+            for (const block of p.content) {
+              if (block.type === 'output_text' && block.text) {
+                messages.push({ role: 'assistant', content: block.text, timestamp: ts })
+              } else if (block.type === 'tool_use' || block.type === 'function_call') {
+                messages.push({
+                  role: 'tool',
+                  content: '',
+                  toolName: block.name || block.type,
+                  toolInput: block.input ? (typeof block.input === 'string' ? block.input : JSON.stringify(block.input)) : undefined,
+                  timestamp: ts,
+                })
+              }
+            }
+          }
+        } catch {}
+      })
+      rl.on('close', () => res())
+    })
+    return messages.length > 0 ? messages : []
+  } catch (err) {
+    log(`loadCodexSession error: ${err}`)
+    return null
+  }
+}
+
 ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPath?: string; projectDir?: string } | string) => {
   const sessionId = typeof arg === 'string' ? arg : arg.sessionId
   const projectPath = typeof arg === 'string' ? undefined : arg.projectPath
@@ -534,6 +908,9 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
   }
 
   try {
+    const codexMessages = await loadCodexSession(sessionId)
+    if (codexMessages) return codexMessages
+
     const projectsBase = resolve(homedir(), '.claude', 'projects')
     let filePath: string
     if (projectDir) {
@@ -1306,6 +1683,7 @@ app.whenReady().then(async () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  cleanupQuotaWatchers()
   controlPlane.shutdown()
   flushLogs()
 })

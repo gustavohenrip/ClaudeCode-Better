@@ -9,9 +9,129 @@ const MarketplacePanel = lazy(() => import('./components/MarketplacePanel').then
 import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
-import { useSessionStore } from './stores/sessionStore'
+import { useSessionStore, useActiveTab } from './stores/sessionStore'
 import { useColors, useThemeStore, spacing } from './theme'
 import { setWindowVisibility } from './stores/sessionStore'
+import type { CodexQuota } from '../shared/types'
+
+function formatResetTime(unixTs: number): string {
+  if (!unixTs) return ''
+  const d = new Date(unixTs * 1000)
+  const now = new Date()
+  const diffMs = d.getTime() - now.getTime()
+  if (diffMs <= 0) return 'full'
+  const diffH = Math.floor(diffMs / 3600000)
+  const diffM = Math.floor((diffMs % 3600000) / 60000)
+  if (diffH >= 24) {
+    const days = Math.floor(diffH / 24)
+    return `${days}d ${diffH % 24}h`
+  }
+  if (diffH > 0) return `${diffH}h ${diffM}m`
+  return `${diffM}m`
+}
+
+function windowLabel(minutes: number): string {
+  if (minutes >= 10080) return '7d'
+  if (minutes >= 1440) return `${Math.round(minutes / 1440)}d`
+  if (minutes >= 60) return `${Math.round(minutes / 60)}h`
+  return `${minutes}m`
+}
+
+function CodexQuotaWidget() {
+  const tab = useActiveTab()
+  const colors = useColors()
+  const [quota, setQuota] = useState<CodexQuota | null>(null)
+
+  const isCodex = tab?.provider === 'codex'
+  const lastResult = tab?.lastResult
+
+  useEffect(() => {
+    if (!isCodex) { setQuota(null); return }
+    const load = () => { window.clui.codexQuota().then(setQuota).catch(() => {}) }
+    load()
+    const iv = setInterval(load, 3000)
+    const unsub = window.clui.onCodexQuotaUpdate((q) => { if (q) setQuota(q) })
+    return () => { clearInterval(iv); unsub() }
+  }, [isCodex, lastResult])
+
+  if (!isCodex || !quota) return null
+
+  const pUsed = Math.round(quota.primaryUsedPercent)
+  const pLeft = 100 - pUsed
+  const sUsed = Math.round(quota.secondaryUsedPercent)
+  const sLeft = 100 - sUsed
+  const pLabel = windowLabel(quota.primaryWindowMinutes)
+  const sLabel = windowLabel(quota.secondaryWindowMinutes)
+  const pReset = formatResetTime(quota.primaryResetsAt)
+  const sReset = formatResetTime(quota.secondaryResetsAt)
+
+  const barColor = (leftPct: number) => {
+    if (leftPct <= 5) return '#c47060'
+    if (leftPct <= 20) return '#d97757'
+    return colors.accent
+  }
+
+  return (
+    <motion.div
+      data-clui-ui
+      initial={{ opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: -8 }}
+      transition={{ duration: 0.2 }}
+      className="glass-surface flex flex-col justify-center gap-2"
+      style={{
+        position: 'absolute',
+        left: 'calc(100% + 10px)',
+        bottom: 0,
+        height: 50,
+        borderRadius: 25,
+        padding: '0 16px',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <QuotaBar
+        label={pLabel}
+        usedPct={pUsed}
+        leftPct={pLeft}
+        resetStr={pReset}
+        fill={barColor(pLeft)}
+        text={colors.textTertiary}
+        textHighlight={colors.textSecondary}
+        track={colors.surfaceSecondary}
+      />
+      <QuotaBar
+        label={sLabel}
+        usedPct={sUsed}
+        leftPct={sLeft}
+        resetStr={sReset}
+        fill={barColor(sLeft)}
+        text={colors.textTertiary}
+        textHighlight={colors.textSecondary}
+        track={colors.surfaceSecondary}
+      />
+    </motion.div>
+  )
+}
+
+function QuotaBar({ label, usedPct, leftPct, resetStr, fill, text, textHighlight, track }: {
+  label: string; usedPct: number; leftPct: number; resetStr: string; fill: string; text: string; textHighlight: string; track: string
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] font-semibold" style={{ color: text, width: 16, textAlign: 'right' }}>{label}</span>
+      <div style={{ width: 64, height: 5, borderRadius: 3, background: track, overflow: 'hidden', flexShrink: 0 }}>
+        <motion.div
+          style={{ height: '100%', borderRadius: 3, background: fill }}
+          initial={false}
+          animate={{ width: `${usedPct}%` }}
+          transition={{ duration: 0.4, ease: 'easeOut' }}
+        />
+      </div>
+      <span className="text-[9px] font-semibold" style={{ color: textHighlight, minWidth: 28, textAlign: 'right' }}>{leftPct}%</span>
+      <span className="text-[8px]" style={{ color: text, opacity: 0.6 }}>{resetStr}</span>
+    </div>
+  )
+}
 
 const SPRING = { type: 'spring' as const, stiffness: 280, damping: 24, mass: 0.8 }
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
@@ -68,13 +188,17 @@ export default function App() {
     const firstTab = useSessionStore.getState().tabs[0]
     if (firstTab) {
       const localId = firstTab.id
-      window.clui.createTab().then(({ tabId }) => {
+      const defProvider = useThemeStore.getState().defaultProvider
+      window.clui.createTab(defProvider).then(({ tabId }) => {
         useSessionStore.setState((s) => ({
           tabs: s.tabs.map((t) => t.id === localId ? { ...t, id: tabId } : t),
           activeTabId: s.activeTabId === localId ? tabId : s.activeTabId,
         }))
-        const rules = useThemeStore.getState().globalRules?.trim()
-        window.clui.initSession(tabId, rules || undefined)
+        useThemeStore.getState().setActiveProvider(defProvider)
+        if (defProvider === 'claude') {
+          const rules = useThemeStore.getState().globalRules?.trim()
+          window.clui.initSession(tabId, rules || undefined)
+        }
       }).catch(() => {})
     }
     useSessionStore.getState().initStaticInfo().then(() => {
@@ -268,6 +392,10 @@ export default function App() {
             >
               <InputBar />
             </div>
+
+            <AnimatePresence>
+              <CodexQuotaWidget />
+            </AnimatePresence>
           </div>
         </div>
       </motion.div>

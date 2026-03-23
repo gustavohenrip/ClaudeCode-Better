@@ -12,6 +12,7 @@ const MULTILINE_ENTER_HEIGHT = 52
 const MULTILINE_EXIT_HEIGHT = 50
 const INLINE_CONTROLS_RESERVED_WIDTH = 104
 
+
 type VoiceState = 'idle' | 'recording' | 'transcribing'
 
 /**

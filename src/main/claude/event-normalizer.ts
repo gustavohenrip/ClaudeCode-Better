@@ -182,3 +182,299 @@ function normalizePermission(event: PermissionEvent): NormalizedEvent[] {
     })),
   }]
 }
+
+export function normalizeCodex(raw: any): NormalizedEvent[] {
+  if (!raw || !raw.type) return []
+
+  switch (raw.type) {
+    case 'thread.started':
+      return [{
+        type: 'session_init',
+        sessionId: raw.thread_id || '',
+        tools: [],
+        model: 'codex',
+        mcpServers: [],
+        skills: [],
+        version: 'codex',
+      }]
+
+    case 'turn.started':
+      return []
+
+    case 'turn.completed': {
+      const u = raw.usage || {}
+      return [{
+        type: 'task_complete',
+        result: '',
+        costUsd: 0,
+        durationMs: 0,
+        numTurns: 1,
+        usage: {
+          input_tokens: u.input_tokens || 0,
+          output_tokens: u.output_tokens || 0,
+          cache_read_input_tokens: u.cached_input_tokens || 0,
+        },
+        sessionId: raw.thread_id || '',
+      }]
+    }
+
+    case 'turn.failed':
+      return [{
+        type: 'error',
+        message: raw.error?.message || 'Codex turn failed',
+        isError: true,
+        sessionId: raw.thread_id || '',
+      }]
+
+    case 'error': {
+      if (raw.message && raw.message.startsWith('Reconnecting')) return []
+      return [{
+        type: 'error',
+        message: raw.message || 'Unknown Codex error',
+        isError: true,
+      }]
+    }
+
+    case 'token_count': {
+      if (raw.rate_limits) {
+        return [{
+          type: 'codex_rate_limits' as any,
+          rateLimits: raw.rate_limits,
+        }]
+      }
+      return []
+    }
+
+    case 'item.started': {
+      const item = raw.item
+      if (!item) return []
+      return normalizeCodexItemStarted(item)
+    }
+
+    case 'item.updated': {
+      const item = raw.item
+      if (!item) return []
+      return normalizeCodexItemUpdated(item)
+    }
+
+    case 'item.completed': {
+      const item = raw.item
+      if (!item) return []
+      return normalizeCodexItemCompleted(item)
+    }
+
+    default:
+      return []
+  }
+}
+
+function isApplyPatch(command: string): boolean {
+  return /apply_patch\s/.test(command) || command.trimStart().startsWith('apply_patch')
+}
+
+function isCatWrite(command: string): boolean {
+  return /cat\s*>{1,2}\s*\S/.test(command)
+}
+
+function parseCatWrite(command: string): { filePath: string; content: string } | null {
+  const catMatch = command.match(/cat\s*>{1,2}\s*(\S+)\s*<<-?\s*'?([A-Za-z_][A-Za-z0-9_]*)'?/)
+  if (!catMatch) return null
+  const filePath = catMatch[1].replace(/^["']|["']$/g, '')
+  const marker = catMatch[2]
+  const matchEnd = catMatch.index! + catMatch[0].length
+  const contentStart = command.indexOf('\n', matchEnd)
+  if (contentStart === -1) return null
+  const rest = command.substring(contentStart + 1)
+  const endPattern = new RegExp(`^${marker}$`, 'm')
+  const endMatch = rest.match(endPattern)
+  if (!endMatch || endMatch.index === undefined) return null
+  const content = rest.substring(0, endMatch.index).replace(/\n$/, '')
+  if (!content) return null
+  return { filePath, content }
+}
+
+function isFileWrite(command: string): boolean {
+  return isApplyPatch(command) || isCatWrite(command)
+}
+
+function parseApplyPatch(command: string): { filePath: string; oldStr: string; newStr: string } | null {
+  const patchStart = command.indexOf('*** Begin Patch')
+  const patchEnd = command.indexOf('*** End Patch')
+  if (patchStart === -1 || patchEnd === -1) return null
+  const patchBody = command.substring(patchStart, patchEnd)
+  const lines = patchBody.split('\n')
+  let filePath = ''
+  const oldLines: string[] = []
+  const newLines: string[] = []
+  let inHunk = false
+
+  for (const line of lines) {
+    if (line.startsWith('--- a/') || line.startsWith('--- ')) {
+      filePath = line.replace(/^---\s+a\//, '').replace(/^---\s+/, '').trim()
+    } else if (line.startsWith('+++ ')) {
+      if (!filePath) filePath = line.replace(/^[+]+\s+b\//, '').replace(/^[+]+\s+/, '').trim()
+    } else if (line.startsWith('@@')) {
+      inHunk = true
+    } else if (inHunk) {
+      if (line.startsWith('-')) {
+        oldLines.push(line.substring(1))
+      } else if (line.startsWith('+')) {
+        newLines.push(line.substring(1))
+      } else if (line.startsWith(' ')) {
+        oldLines.push(line.substring(1))
+        newLines.push(line.substring(1))
+      }
+    }
+  }
+  if (oldLines.length === 0 && newLines.length === 0) return null
+  return { filePath, oldStr: oldLines.join('\n'), newStr: newLines.join('\n') }
+}
+
+function normalizeCodexItemStarted(item: any): NormalizedEvent[] {
+  switch (item.type) {
+    case 'command_execution': {
+      const cmd = item.command || ''
+      if (isApplyPatch(cmd)) {
+        return [{ type: 'tool_call', toolName: 'Edit', toolId: item.id || '', index: 0 }]
+      }
+      if (isCatWrite(cmd)) {
+        return [{ type: 'tool_call', toolName: 'Write', toolId: item.id || '', index: 0 }]
+      }
+      return [{ type: 'tool_call', toolName: 'Bash', toolId: item.id || '', index: 0 }]
+    }
+
+    case 'file_change': {
+      const changes = Array.isArray(item.changes) ? item.changes : []
+      const first = changes[0]
+      if (!first) return []
+      const isCreate = first.kind === 'create'
+      return [{ type: 'tool_call', toolName: isCreate ? 'Write' : 'Edit', toolId: item.id || '', index: 0 }]
+    }
+
+    case 'mcp_tool_call':
+      return [{ type: 'tool_call', toolName: `${item.server || 'mcp'}:${item.tool || 'unknown'}`, toolId: item.id || '', index: 0 }]
+
+    case 'web_search':
+      return [{ type: 'tool_call', toolName: 'WebSearch', toolId: item.id || '', index: 0 }]
+
+    default:
+      return []
+  }
+}
+
+function normalizeCodexItemUpdated(item: any): NormalizedEvent[] {
+  switch (item.type) {
+    case 'command_execution': {
+      const cmd = item.command || ''
+      if (isFileWrite(cmd)) return []
+      if (item.aggregated_output) {
+        return [{ type: 'tool_call_update', toolId: item.id || '', partialInput: item.aggregated_output }]
+      }
+      return []
+    }
+
+    case 'agent_message': {
+      if (item.text) {
+        return [{ type: 'text_chunk', text: item.text }]
+      }
+      return []
+    }
+
+    default:
+      return []
+  }
+}
+
+function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
+  switch (item.type) {
+    case 'agent_message':
+      if (item.text) {
+        return [{ type: 'text_chunk', text: item.text }]
+      }
+      return []
+
+    case 'reasoning':
+      if (item.text) {
+        return [{ type: 'thinking_chunk', thinking: item.text }]
+      }
+      return []
+
+    case 'command_execution': {
+      const events: NormalizedEvent[] = []
+      const input = item.command || ''
+      if (isApplyPatch(input)) {
+        const parsed = parseApplyPatch(input)
+        if (parsed) {
+          const json = JSON.stringify({ file_path: parsed.filePath, old_string: parsed.oldStr, new_string: parsed.newStr })
+          events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: json })
+        }
+      } else if (isCatWrite(input)) {
+        const parsed = parseCatWrite(input)
+        if (parsed) {
+          const json = JSON.stringify({ file_path: parsed.filePath, content: parsed.content })
+          events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: json })
+        }
+      } else if (input) {
+        events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: input })
+      }
+      events.push({ type: 'tool_call_complete', index: 0 })
+      return events
+    }
+
+    case 'file_change': {
+      const events: NormalizedEvent[] = []
+      const changes = Array.isArray(item.changes) ? item.changes : []
+      const first = changes[0]
+      if (first && first.path) {
+        const isCreate = first.kind === 'create'
+        const json = isCreate
+          ? JSON.stringify({ file_path: first.path, content: '' })
+          : JSON.stringify({ file_path: first.path, old_string: '', new_string: '' })
+        events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: json })
+      }
+      events.push({ type: 'tool_call_complete', index: 0 })
+      return events
+    }
+
+    case 'mcp_tool_call': {
+      const events: NormalizedEvent[] = []
+      if (item.arguments) {
+        events.push({
+          type: 'tool_call_update',
+          toolId: item.id || '',
+          partialInput: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments, null, 2),
+        })
+      }
+      events.push({ type: 'tool_call_complete', index: 0 })
+      return events
+    }
+
+    case 'web_search': {
+      const events: NormalizedEvent[] = []
+      if (item.query) {
+        events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: item.query })
+      }
+      events.push({ type: 'tool_call_complete', index: 0 })
+      return events
+    }
+
+    case 'todo_list': {
+      const entries = Array.isArray(item.items) ? item.items : []
+      const text = entries.map((e: any) => `${e.completed ? '[x]' : '[ ]'} ${e.text || ''}`).join('\n')
+      if (text) {
+        return [{ type: 'text_chunk', text: '\n' + text + '\n' }]
+      }
+      return []
+    }
+
+    case 'error':
+      return [{
+        type: 'error',
+        message: item.message || 'Codex item error',
+        isError: true,
+      }]
+
+    default:
+      return []
+  }
+}

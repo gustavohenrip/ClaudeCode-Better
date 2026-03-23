@@ -11,6 +11,19 @@ export const AVAILABLE_MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ] as const
 
+export const CODEX_MODELS = [
+  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.4', label: 'GPT-5.4' },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
+  { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
+  { id: 'gpt-5.1-codex-max', label: 'GPT-5.1 Codex Max' },
+  { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
+  { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
+  { id: 'gpt-5-codex-mini', label: 'GPT-5 Codex Mini' },
+] as const
+
+export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh'
+
 export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-6'])
 
 export function getEffectiveModelId(preferredModel: string | null): string {
@@ -19,21 +32,22 @@ export function getEffectiveModelId(preferredModel: string | null): string {
 
 const SESSION_SETTINGS_KEY = 'clui-session-settings'
 
-function loadSessionSettings(): { preferredModel: string | null; permissionMode: 'ask' | 'auto' } {
+function loadSessionSettings(): { preferredModel: string | null; preferredCodexModel: string | null; permissionMode: 'ask' | 'auto' } {
   try {
     const raw = localStorage.getItem(SESSION_SETTINGS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
       return {
         preferredModel: typeof parsed.preferredModel === 'string' ? parsed.preferredModel : null,
+        preferredCodexModel: typeof parsed.preferredCodexModel === 'string' ? parsed.preferredCodexModel : null,
         permissionMode: parsed.permissionMode === 'auto' ? 'auto' : 'ask',
       }
     }
   } catch {}
-  return { preferredModel: null, permissionMode: 'ask' }
+  return { preferredModel: null, preferredCodexModel: null, permissionMode: 'ask' }
 }
 
-function saveSessionSettings(s: { preferredModel: string | null; permissionMode: 'ask' | 'auto' }): void {
+function saveSessionSettings(s: { preferredModel: string | null; preferredCodexModel: string | null; permissionMode: 'ask' | 'auto' }): void {
   try { localStorage.setItem(SESSION_SETTINGS_KEY, JSON.stringify(s)) } catch {}
 }
 
@@ -56,9 +70,8 @@ interface State {
   isExpanded: boolean
   /** Global info fetched on startup (not per-session) */
   staticInfo: StaticInfo | null
-  /** User's preferred model override (null = use default) */
   preferredModel: string | null
-  /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls */
+  preferredCodexModel: string | null
   permissionMode: 'ask' | 'auto'
 
   // Marketplace state
@@ -73,9 +86,10 @@ interface State {
 
   // Actions
   initStaticInfo: () => Promise<void>
-  setPreferredModel: (model: string | null) => void
+  setPreferredModel: (model: string | null, provider?: 'claude' | 'codex') => void
   setPermissionMode: (mode: 'ask' | 'auto') => void
-  createTab: () => Promise<string>
+  createTab: (provider?: 'claude' | 'codex') => Promise<string>
+  switchProvider: () => void
   selectTab: (tabId: string) => void
   closeTab: (tabId: string) => void
   clearTab: () => void
@@ -88,7 +102,7 @@ interface State {
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
-  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string) => Promise<string>
+  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: string) => Promise<string>
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
@@ -180,9 +194,10 @@ function sendTaskNotification(tabId: string, tab: { title: string; workingDirect
   try { window.clui.notifyNative({ title, body }) } catch {}
 }
 
-function makeLocalTab(): TabState {
+function makeLocalTab(provider: 'claude' | 'codex' = 'claude'): TabState {
   return {
     id: crypto.randomUUID(),
+    provider,
     claudeSessionId: null,
     status: 'idle',
     activeRequestId: null,
@@ -207,7 +222,7 @@ function makeLocalTab(): TabState {
   }
 }
 
-const initialTab = makeLocalTab()
+const initialTab = makeLocalTab(useThemeStore.getState().defaultProvider)
 
 export const useSessionStore = create<State>((set, get) => ({
   tabs: [initialTab],
@@ -215,6 +230,7 @@ export const useSessionStore = create<State>((set, get) => ({
   isExpanded: false,
   staticInfo: null,
   preferredModel: savedSession.preferredModel,
+  preferredCodexModel: savedSession.preferredCodexModel,
   permissionMode: savedSession.permissionMode,
 
   // Marketplace
@@ -242,26 +258,36 @@ export const useSessionStore = create<State>((set, get) => ({
     } catch {}
   },
 
-  setPreferredModel: (model) => {
-    set({ preferredModel: model })
-    saveSessionSettings({ preferredModel: model, permissionMode: get().permissionMode })
-    const supportsMax = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(model))
-    if (!supportsMax && useThemeStore.getState().effort === 'max') {
-      useThemeStore.getState().setEffort('high')
+  setPreferredModel: (model, provider) => {
+    const s = get()
+    const activeTab = s.tabs.find((t) => t.id === s.activeTabId)
+    const isCodex = provider === 'codex' || activeTab?.provider === 'codex'
+    if (isCodex) {
+      set({ preferredCodexModel: model })
+      saveSessionSettings({ preferredModel: s.preferredModel, preferredCodexModel: model, permissionMode: s.permissionMode })
+    } else {
+      set({ preferredModel: model })
+      saveSessionSettings({ preferredModel: model, preferredCodexModel: s.preferredCodexModel, permissionMode: s.permissionMode })
+      const supportsMax = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(model))
+      if (!supportsMax && useThemeStore.getState().effort === 'max') {
+        useThemeStore.getState().setEffort('high')
+      }
     }
   },
 
   setPermissionMode: (mode) => {
     set({ permissionMode: mode })
     window.clui.setPermissionMode(mode)
-    saveSessionSettings({ preferredModel: get().preferredModel, permissionMode: mode })
+    const s = get()
+    saveSessionSettings({ preferredModel: s.preferredModel, preferredCodexModel: s.preferredCodexModel, permissionMode: mode })
   },
 
-  createTab: async () => {
+  createTab: async (provider?: 'claude' | 'codex') => {
+    const prov = provider || useThemeStore.getState().defaultProvider
     const homeDir = get().staticInfo?.homePath || '~'
-    const { tabId } = await window.clui.createTab()
+    const { tabId } = await window.clui.createTab(prov)
     const tab: TabState = {
-      ...makeLocalTab(),
+      ...makeLocalTab(prov),
       id: tabId,
       workingDirectory: homeDir,
     }
@@ -269,26 +295,39 @@ export const useSessionStore = create<State>((set, get) => ({
       tabs: [...s.tabs, tab],
       activeTabId: tab.id,
     }))
-    const rules = useThemeStore.getState().globalRules?.trim()
-    window.clui.initSession(tabId, rules || undefined)
+    useThemeStore.getState().setActiveProvider(prov)
+    if (prov === 'claude') {
+      const rules = useThemeStore.getState().globalRules?.trim()
+      window.clui.initSession(tabId, rules || undefined)
+    }
     return tabId
+  },
+
+  switchProvider: () => {
+    const s = get()
+    const tab = s.tabs.find((t) => t.id === s.activeTabId)
+    if (!tab) return
+    if (tab.status === 'running' || tab.status === 'connecting') return
+    const newProvider = tab.provider === 'claude' ? 'codex' as const : 'claude' as const
+    get().createTab(newProvider)
   },
 
   selectTab: (tabId) => {
     const s = get()
     if (tabId === s.activeTabId) {
-      // Clicking the already-active tab: toggle global expand/collapse
       const willExpand = !s.isExpanded
       set((prev) => ({
         isExpanded: willExpand,
         marketplaceOpen: false,
-        // Expanding = reading: clear unread flag
         tabs: willExpand
           ? prev.tabs.map((t) => t.id === tabId ? { ...t, hasUnread: false } : t)
           : prev.tabs,
       }))
     } else {
-      // Switching to a different tab: mark as read
+      const targetTab = s.tabs.find((t) => t.id === tabId)
+      if (targetTab) {
+        useThemeStore.getState().setActiveProvider(targetTab.provider)
+      }
       set((prev) => ({
         activeTabId: tabId,
         marketplaceOpen: false,
@@ -413,21 +452,26 @@ export const useSessionStore = create<State>((set, get) => ({
 
     if (s.activeTabId === tabId) {
       if (remaining.length === 0) {
-        const newTab = makeLocalTab()
+        const defProv = useThemeStore.getState().defaultProvider
+        const newTab = makeLocalTab(defProv)
         const localId = newTab.id
         set({ tabs: [newTab], activeTabId: localId })
-        window.clui.createTab().then(({ tabId }) => {
-          const rules = useThemeStore.getState().globalRules?.trim()
+        useThemeStore.getState().setActiveProvider(defProv)
+        window.clui.createTab(defProv).then(({ tabId }) => {
           set((s) => ({
             tabs: s.tabs.map((t) => t.id === localId ? { ...t, id: tabId } : t),
             activeTabId: s.activeTabId === localId ? tabId : s.activeTabId,
           }))
-          window.clui.initSession(tabId, rules || undefined)
+          if (defProv === 'claude') {
+            const rules = useThemeStore.getState().globalRules?.trim()
+            window.clui.initSession(tabId, rules || undefined)
+          }
         }).catch(() => {})
         return
       }
       const closedIndex = s.tabs.findIndex((t) => t.id === tabId)
       const newActive = remaining[Math.min(closedIndex, remaining.length - 1)]
+      useThemeStore.getState().setActiveProvider(newActive.provider)
       set({ tabs: remaining, activeTabId: newActive.id })
     } else {
       set({ tabs: remaining })
@@ -445,14 +489,15 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
   },
 
-  resumeSession: async (sessionId, title, projectPath, projectDir) => {
+  resumeSession: async (sessionId, title, projectPath, projectDir, provider) => {
+    const prov = provider || 'claude'
     const resolvedDir = projectPath
       ? null
       : projectDir
         ? await window.clui.resolveProjectDir(projectDir).catch(() => null) || null
         : await window.clui.resolveSessionDir(sessionId).catch(() => null) || null
     const defaultDir = projectPath || resolvedDir || get().staticInfo?.homePath || '~'
-    const { tabId } = await window.clui.createTab()
+    const { tabId } = await window.clui.createTab(prov === 'codex' ? 'codex' : undefined)
 
     const history = await window.clui.loadSession(sessionId, projectPath, projectDir).catch(() => [])
     const messages: Message[] = history.map((m) => ({
@@ -466,7 +511,7 @@ export const useSessionStore = create<State>((set, get) => ({
     }))
 
     const tab: TabState = {
-      ...makeLocalTab(),
+      ...makeLocalTab(prov),
       id: tabId,
       claudeSessionId: sessionId,
       title: title || 'Resumed Session',
@@ -474,6 +519,7 @@ export const useSessionStore = create<State>((set, get) => ({
       hasChosenDirectory: !!(projectPath || resolvedDir),
       messages,
     }
+    useThemeStore.getState().setActiveProvider(prov)
     set((s) => ({
       tabs: [...s.tabs, tab],
       activeTabId: tab.id,
@@ -669,20 +715,23 @@ export const useSessionStore = create<State>((set, get) => ({
       }))
     }
 
-    const { preferredModel } = get()
+    const { preferredModel, preferredCodexModel } = get()
     const { effort, thinkingEnabled, globalRules } = useThemeStore.getState()
-    const effectiveEffort: EffortLevel = (effort === 'max' && !MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel)))
+    const isCodexTab = tab.provider === 'codex'
+    const activeModel = isCodexTab ? preferredCodexModel : preferredModel
+    const effectiveEffort: EffortLevel = (effort === 'max' && !isCodexTab && !MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel)))
       ? 'high'
       : effort
     const runOptions = {
       prompt: fullPrompt,
       projectPath: resolvedPath,
+      provider: tab.provider,
       sessionId: tab.claudeSessionId || undefined,
-      model: preferredModel || undefined,
+      model: activeModel || undefined,
       addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
       effort: effectiveEffort !== 'medium' ? effectiveEffort : undefined,
-      thinking: (thinkingEnabled ? 'adaptive' : 'disabled') as 'adaptive' | 'disabled',
-      systemPrompt: globalRules.trim() || undefined,
+      thinking: isCodexTab ? undefined : (thinkingEnabled ? 'adaptive' : 'disabled') as 'adaptive' | 'disabled',
+      systemPrompt: isCodexTab ? undefined : (globalRules.trim() || undefined),
     }
 
     window.clui.prompt(activeTabId, requestId, runOptions).catch((err: Error) => {
