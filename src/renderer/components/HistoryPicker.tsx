@@ -100,7 +100,7 @@ export function HistoryPicker() {
     const title = session.firstMessage
       ? (session.firstMessage.length > 30 ? session.firstMessage.substring(0, 27) + '...' : session.firstMessage)
       : session.slug || 'Resumed'
-    void resumeSession(session.sessionId, title, undefined, session.projectDir)
+    void resumeSession(session.sessionId, title, session.cwd || undefined, session.projectDir)
   }
 
   const filtered = search.trim()

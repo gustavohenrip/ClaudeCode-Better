@@ -76,7 +76,7 @@ export class ControlPlane extends EventEmitter {
   /** Global permission mode: 'ask' shows cards, 'auto' auto-approves */
   private permissionMode: 'ask' | 'auto' = 'ask'
   private hookServerReady: Promise<void>
-  private warmHandles = new Map<string, { requestId: string; cwd: string }>()
+  private warmHandles = new Map<string, { requestId: string; cwd: string; model?: string }>()
   private resumedRequests = new Map<string, { tabId: string; options: RunOptions }>()
 
   constructor(interactivePty = false) {
@@ -201,7 +201,7 @@ export class ControlPlane extends EventEmitter {
 
           this._setTabStatus(tabId, 'completed')
 
-          this.warmHandles.set(tabId, { requestId, cwd: '' })
+          this.warmHandles.set(tabId, { requestId, cwd: '', model: handle.model })
           log(`Process kept warm for tab ${tabId.substring(0, 8)}… (PID ${handle.pid})`)
 
           this._processQueue(tabId)
@@ -746,36 +746,53 @@ export class ControlPlane extends EventEmitter {
     if (!tab) throw new Error(`Tab ${tabId} disappeared`)
 
     const warm = this.warmHandles.get(tabId)
+    const hasSessionToResume = !!(options.sessionId || tab.claudeSessionId)
 
-    if (warm) {
+    if (warm && hasSessionToResume) {
+      this.warmHandles.delete(tabId)
+      this.initRequestIds.delete(warm.requestId)
+      this.runManager.cancel(warm.requestId)
+      const rt = this.runTokens.get(warm.requestId)
+      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
+      log(`Cancelled warm process for tab ${tabId.substring(0, 8)}… — resuming session`)
+    }
+
+    if (warm && !hasSessionToResume) {
       this.warmHandles.delete(tabId)
       this.initRequestIds.delete(warm.requestId)
 
-      const oldToken = this.runTokens.get(warm.requestId)
-      if (oldToken) {
-        this.runTokens.delete(warm.requestId)
-        this.runTokens.set(requestId, oldToken)
+      if (warm.model !== options.model) {
+        this.runManager.cancel(warm.requestId)
+        const rt = this.runTokens.get(warm.requestId)
+        if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
+        log(`Warm model mismatch (${warm.model ?? 'default'} → ${options.model ?? 'default'}) — spawning new`)
+      } else {
+        const oldToken = this.runTokens.get(warm.requestId)
+        if (oldToken) {
+          this.runTokens.delete(warm.requestId)
+          this.runTokens.set(requestId, oldToken)
+        }
+
+        const handle = this.runManager.reuseRun(warm.requestId, requestId, options)
+        if (handle) {
+          tab.activeRequestId = requestId
+          tab.promptCount++
+          tab.lastActivityAt = Date.now()
+          tab.runPid = handle.pid
+          this._setTabStatus(tabId, 'running')
+          log(`Reused warm process for tab ${tabId.substring(0, 8)}… (PID ${handle.pid})`)
+
+          let resolve!: (value: void) => void
+          let reject!: (reason: Error) => void
+          const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej })
+          this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve, reject })
+          return promise
+        }
+
+        log(`Warm process reuse failed for tab ${tabId.substring(0, 8)}… — spawning new`)
+        const rt = this.runTokens.get(warm.requestId)
+        if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
       }
-
-      const handle = this.runManager.reuseRun(warm.requestId, requestId, options)
-      if (handle) {
-        tab.activeRequestId = requestId
-        tab.promptCount++
-        tab.lastActivityAt = Date.now()
-        tab.runPid = handle.pid
-        this._setTabStatus(tabId, 'running')
-        log(`Reused warm process for tab ${tabId.substring(0, 8)}… (PID ${handle.pid})`)
-
-        let resolve!: (value: void) => void
-        let reject!: (reason: Error) => void
-        const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej })
-        this.inflightRequests.set(requestId, { requestId, tabId, promise, resolve, reject })
-        return promise
-      }
-
-      log(`Warm process reuse failed for tab ${tabId.substring(0, 8)}… — spawning new`)
-      const rt = this.runTokens.get(warm.requestId)
-      if (rt) { this.permissionServer.unregisterRun(rt); this.runTokens.delete(warm.requestId) }
     }
 
     await Promise.race([

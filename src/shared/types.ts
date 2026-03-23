@@ -184,6 +184,7 @@ export interface Message {
   toolInput?: string
   toolStatus?: 'running' | 'completed' | 'error'
   timestamp: number
+  attachments?: Attachment[]
 }
 
 export interface RunResult {
@@ -278,6 +279,7 @@ export interface SessionMeta {
   lastTimestamp: string
   size: number
   projectDir: string
+  cwd: string | null
 }
 
 export interface SessionLoadMessage {

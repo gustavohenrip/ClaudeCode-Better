@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard, Notification } from 'electron'
-import { join, resolve, dirname } from 'path'
+import { join, resolve, dirname, isAbsolute } from 'path'
 import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -312,7 +312,13 @@ ipcMain.handle(IPC.IS_VISIBLE, () => {
 
 ipcMain.on(IPC.NOTIFY_NATIVE, (_e, payload: { title: string; body: string }) => {
   if (!Notification.isSupported()) return
-  const n = new Notification({ title: payload.title, body: payload.body, silent: true })
+  const iconPath = join(__dirname, '../../resources/icon.png')
+  const n = new Notification({
+    title: payload.title,
+    body: payload.body,
+    silent: true,
+    icon: nativeImage.createFromPath(iconPath),
+  })
   n.on('click', () => showWindow('notification-click'))
   n.show()
 })
@@ -449,7 +455,7 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
     }
 
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number; projectDir: string }> = []
+    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number; projectDir: string; cwd: string | null }> = []
 
     for (const projectDir of projectDirs) {
       const sessionsDir = join(projectsRoot, projectDir)
@@ -465,8 +471,8 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
         const stat = statSync(filePath)
         if (stat.size < 100) continue
 
-        const meta: { validated: boolean; slug: string | null; firstMessage: string | null; lastTimestamp: string | null } = {
-          validated: false, slug: null, firstMessage: null, lastTimestamp: null,
+        const meta: { validated: boolean; slug: string | null; firstMessage: string | null; lastTimestamp: string | null; cwd: string | null } = {
+          validated: false, slug: null, firstMessage: null, lastTimestamp: null, cwd: null,
         }
 
         await new Promise<void>((resolve) => {
@@ -476,6 +482,7 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
               const obj = JSON.parse(line)
               if (!meta.validated && obj.type && obj.uuid && obj.timestamp) meta.validated = true
               if (obj.slug && !meta.slug) meta.slug = obj.slug
+              if (typeof obj.cwd === 'string' && obj.cwd.trim() !== '' && isAbsolute(obj.cwd.trim()) && !meta.cwd) meta.cwd = obj.cwd.trim()
               if (obj.timestamp) meta.lastTimestamp = obj.timestamp
               if (obj.type === 'user' && !meta.firstMessage) {
                 const content = obj.message?.content
@@ -499,6 +506,7 @@ ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
             lastTimestamp: meta.lastTimestamp || stat.mtime.toISOString(),
             size: stat.size,
             projectDir,
+            cwd: meta.cwd,
           })
         }
       }
@@ -592,9 +600,36 @@ ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPat
 })
 
 function decodeEncodedDir(encoded: string): string {
-  if (!encoded.startsWith('-')) return homedir()
+  if (process.platform === 'win32') {
+    const parts = encoded.split('-')
+    const driveLetter = parts[0]
+    if (!driveLetter || driveLetter.length !== 1) return ''
+    const baseDir = driveLetter.toUpperCase() + ':\\'
+    const startIdx = parts.length > 1 && parts[1] === '' ? 2 : 1
+    const dfsWin = (idx: number, current: string): string | null => {
+      if (idx >= parts.length) return existsSync(current) ? current : null
+      for (let take = 1; idx + take <= parts.length; take++) {
+        const component = parts.slice(idx, idx + take).join('-')
+        if (!component) continue
+        const next = join(current, component)
+        if (idx + take === parts.length) {
+          if (existsSync(next)) return next
+        } else {
+          try {
+            if (existsSync(next) && statSync(next).isDirectory()) {
+              const result = dfsWin(idx + take, next)
+              if (result) return result
+            }
+          } catch {}
+        }
+      }
+      return null
+    }
+    return dfsWin(startIdx, baseDir) || ''
+  }
+  if (!encoded.startsWith('-')) return ''
   const parts = encoded.slice(1).split('-')
-  function dfs(idx: number, current: string): string | null {
+  const dfs = (idx: number, current: string): string | null => {
     if (idx >= parts.length) return existsSync(current) ? current : null
     for (let take = 1; idx + take <= parts.length; take++) {
       const component = parts.slice(idx, idx + take).join('-')
@@ -612,7 +647,7 @@ function decodeEncodedDir(encoded: string): string {
     }
     return null
   }
-  return dfs(0, '') || homedir()
+  return dfs(0, '') || ''
 }
 
 ipcMain.handle(IPC.RESOLVE_PROJECT_DIR, (_e, projectDir: string): string => {
@@ -629,7 +664,7 @@ ipcMain.handle(IPC.RESOLVE_SESSION_DIR, (_e, sessionId: string): string => {
       }
     }
   } catch {}
-  return homedir()
+  return ''
 })
 
 ipcMain.handle(IPC.SELECT_DIRECTORY, async () => {

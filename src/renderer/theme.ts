@@ -274,6 +274,12 @@ export type ThemeMode = 'system' | 'light' | 'dark'
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max'
 
+export interface RulesProfile {
+  id: string
+  name: string
+  content: string
+}
+
 interface ThemeState {
   isDark: boolean
   themeMode: ThemeMode
@@ -282,6 +288,9 @@ interface ThemeState {
   effort: EffortLevel
   thinkingEnabled: boolean
   globalRules: string
+  rulesProfiles: RulesProfile[]
+  activeProfileId: string | null
+  freeRules: string
   /** OS-reported dark mode — used when themeMode is 'system' */
   _systemIsDark: boolean
   setIsDark: (isDark: boolean) => void
@@ -291,6 +300,11 @@ interface ThemeState {
   setEffort: (effort: EffortLevel) => void
   setThinkingEnabled: (enabled: boolean) => void
   setGlobalRules: (rules: string) => void
+  setActiveProfile: (id: string | null) => void
+  createProfile: (name: string) => RulesProfile | null
+  updateProfileName: (id: string, name: string) => boolean
+  setRulesContent: (content: string) => void
+  deleteProfile: (id: string) => void
   /** Called by OS theme change listener — updates system value */
   setSystemTheme: (isDark: boolean) => void
 }
@@ -316,6 +330,7 @@ function applyTheme(isDark: boolean): void {
 
 const SETTINGS_KEY = 'clui-settings'
 const GLOBAL_RULES_KEY = 'clui-global-rules'
+const RULES_V1_KEY = 'clui-rules-v1'
 
 function loadGlobalRules(): string {
   try { return localStorage.getItem(GLOBAL_RULES_KEY) || '' } catch { return '' }
@@ -323,6 +338,33 @@ function loadGlobalRules(): string {
 
 function saveGlobalRules(rules: string): void {
   try { localStorage.setItem(GLOBAL_RULES_KEY, rules) } catch {}
+}
+
+function loadRulesV1(): { profiles: RulesProfile[]; activeProfileId: string | null; freeRules: string } {
+  try {
+    const raw = localStorage.getItem(RULES_V1_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && parsed.version === 1) {
+        const profiles: RulesProfile[] = Array.isArray(parsed.profiles)
+          ? parsed.profiles.filter((p: unknown) => {
+              const x = p as Record<string, unknown>
+              return typeof x?.id === 'string' && typeof x?.name === 'string' && typeof x?.content === 'string'
+            })
+          : []
+        const activeProfileId = typeof parsed.activeProfileId === 'string' && profiles.some((p) => p.id === parsed.activeProfileId)
+          ? parsed.activeProfileId as string
+          : null
+        const freeRules = typeof parsed.freeRules === 'string' ? parsed.freeRules : loadGlobalRules()
+        return { profiles, activeProfileId, freeRules }
+      }
+    }
+  } catch {}
+  return { profiles: [], activeProfileId: null, freeRules: loadGlobalRules() }
+}
+
+function saveRulesV1(state: { profiles: RulesProfile[]; activeProfileId: string | null; freeRules: string }): void {
+  try { localStorage.setItem(RULES_V1_KEY, JSON.stringify({ version: 1, ...state })) } catch {}
 }
 
 function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean } {
@@ -347,6 +389,7 @@ function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expanded
 }
 
 const saved = loadSettings()
+const savedRules = loadRulesV1()
 
 export const useThemeStore = create<ThemeState>((set, get) => ({
   isDark: saved.themeMode === 'dark' ? true : saved.themeMode === 'light' ? false : (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true),
@@ -355,7 +398,12 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   expandedUI: saved.expandedUI,
   effort: saved.effort,
   thinkingEnabled: saved.thinkingEnabled,
-  globalRules: loadGlobalRules(),
+  globalRules: savedRules.activeProfileId !== null
+    ? (savedRules.profiles.find((p) => p.id === savedRules.activeProfileId)?.content ?? savedRules.freeRules)
+    : savedRules.freeRules,
+  rulesProfiles: savedRules.profiles,
+  activeProfileId: savedRules.activeProfileId,
+  freeRules: savedRules.freeRules,
   _systemIsDark: typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : true,
   setIsDark: (isDark) => {
     set({ isDark })
@@ -389,8 +437,70 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     saveSettings({ themeMode: s.themeMode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled })
   },
   setGlobalRules: (rules) => {
-    set({ globalRules: rules })
-    saveGlobalRules(rules)
+    get().setRulesContent(rules)
+  },
+  setActiveProfile: (id) => {
+    const { rulesProfiles, freeRules } = get()
+    if (id === null) {
+      set({ activeProfileId: null, globalRules: freeRules })
+      saveRulesV1({ profiles: rulesProfiles, activeProfileId: null, freeRules })
+    } else {
+      const profile = rulesProfiles.find((p) => p.id === id)
+      if (!profile) return
+      set({ activeProfileId: id, globalRules: profile.content })
+      saveRulesV1({ profiles: rulesProfiles, activeProfileId: id, freeRules })
+    }
+  },
+  createProfile: (name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return null
+    const { rulesProfiles, freeRules } = get()
+    if (rulesProfiles.some((p) => p.name.trim().toLowerCase() === trimmed.toLowerCase())) return null
+    const newProfile: RulesProfile = { id: crypto.randomUUID(), name: trimmed, content: '' }
+    const newProfiles = [...rulesProfiles, newProfile]
+    set({ rulesProfiles: newProfiles, activeProfileId: newProfile.id, globalRules: '' })
+    saveRulesV1({ profiles: newProfiles, activeProfileId: newProfile.id, freeRules })
+    return newProfile
+  },
+  updateProfileName: (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return false
+    const { rulesProfiles, activeProfileId, freeRules } = get()
+    if (!rulesProfiles.some((p) => p.id === id)) return false
+    if (rulesProfiles.some((p) => p.id !== id && p.name.trim().toLowerCase() === trimmed.toLowerCase())) return false
+    const newProfiles = rulesProfiles.map((p) => p.id === id ? { ...p, name: trimmed } : p)
+    set({ rulesProfiles: newProfiles })
+    saveRulesV1({ profiles: newProfiles, activeProfileId, freeRules })
+    return true
+  },
+  setRulesContent: (content) => {
+    const { activeProfileId, rulesProfiles, freeRules } = get()
+    if (activeProfileId === null) {
+      set({ globalRules: content, freeRules: content })
+      saveRulesV1({ profiles: rulesProfiles, activeProfileId: null, freeRules: content })
+      saveGlobalRules(content)
+    } else {
+      const profileExists = rulesProfiles.some((p) => p.id === activeProfileId)
+      if (!profileExists) {
+        set({ activeProfileId: null, globalRules: freeRules })
+        saveRulesV1({ profiles: rulesProfiles, activeProfileId: null, freeRules })
+        return
+      }
+      const newProfiles = rulesProfiles.map((p) => p.id === activeProfileId ? { ...p, content } : p)
+      set({ rulesProfiles: newProfiles, globalRules: content })
+      saveRulesV1({ profiles: newProfiles, activeProfileId, freeRules })
+    }
+  },
+  deleteProfile: (id) => {
+    const { rulesProfiles, activeProfileId, freeRules } = get()
+    const newProfiles = rulesProfiles.filter((p) => p.id !== id)
+    if (activeProfileId === id) {
+      set({ rulesProfiles: newProfiles, activeProfileId: null, globalRules: freeRules })
+      saveRulesV1({ profiles: newProfiles, activeProfileId: null, freeRules })
+    } else {
+      set({ rulesProfiles: newProfiles })
+      saveRulesV1({ profiles: newProfiles, activeProfileId, freeRules })
+    }
   },
   setSystemTheme: (isDark) => {
     const s = get()

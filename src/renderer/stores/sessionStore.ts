@@ -106,17 +106,48 @@ interface State {
 let msgCounter = 0
 const nextMsgId = () => `msg-${++msgCounter}`
 
-// ─── Notification sound (plays when task completes while window is hidden) ───
-const notificationAudio = new Audio(notificationSrc)
-notificationAudio.volume = 1.0
+let _audioCtx: AudioContext | null = null
+let _audioBuffer: AudioBuffer | null = null
+let _audioInitPromise: Promise<void> | null = null
+
+function _initAmplifiedAudio(): Promise<void> {
+  if (_audioInitPromise) return _audioInitPromise
+  _audioInitPromise = (async () => {
+    try {
+      _audioCtx = new AudioContext()
+      const resp = await fetch(notificationSrc)
+      const buf = await resp.arrayBuffer()
+      _audioBuffer = await _audioCtx.decodeAudioData(buf)
+    } catch {
+      _audioCtx = null
+      _audioBuffer = null
+      _audioInitPromise = null
+    }
+  })()
+  return _audioInitPromise
+}
+
+function _playAmplified(): void {
+  try {
+    if (!_audioCtx || !_audioBuffer) return
+    if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {})
+    const source = _audioCtx.createBufferSource()
+    source.buffer = _audioBuffer
+    const gain = _audioCtx.createGain()
+    gain.gain.value = 2.0
+    source.connect(gain)
+    gain.connect(_audioCtx.destination)
+    source.start(0)
+  } catch {}
+}
 
 async function playNotificationIfHidden(): Promise<void> {
   if (!useThemeStore.getState().soundEnabled) return
   try {
     const visible = await window.clui.isVisible()
     if (!visible) {
-      notificationAudio.currentTime = 0
-      notificationAudio.play().catch(() => {})
+      await _initAmplifiedAudio()
+      _playAmplified()
     }
   } catch {}
 }
@@ -135,10 +166,18 @@ function pathBasename(p: string): string {
 function sendTaskNotification(tabId: string, tab: { title: string; workingDirectory: string }, durationMs: number, activeTabId: string): void {
   if (_windowVisible && tabId === activeTabId) return
   const dir = pathBasename(tab.workingDirectory)
-  const label = (tab.title && tab.title !== 'New Tab') ? tab.title : (dir || 'Claude')
+  const hasTitle = tab.title && tab.title !== 'New Tab'
+  const title = 'Claude Code'
   const secs = durationMs > 0 ? Math.round(durationMs / 1000) : 0
-  const body = secs > 0 ? `Completed in ${secs}s${dir ? ` • ${dir}` : ''}` : `Task completed${dir ? ` • ${dir}` : ''}`
-  try { window.clui.notifyNative({ title: label, body }) } catch {}
+  const timeStr = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`
+  let body = ''
+  if (hasTitle) {
+    body = secs > 0 ? `${tab.title}\nCompleted in ${timeStr}` : `${tab.title}\nTask completed`
+  } else {
+    body = secs > 0 ? `Task completed in ${timeStr}` : 'Task completed'
+  }
+  if (dir) body += ` | ${dir}`
+  try { window.clui.notifyNative({ title, body }) } catch {}
 }
 
 function makeLocalTab(): TabState {
@@ -409,7 +448,9 @@ export const useSessionStore = create<State>((set, get) => ({
   resumeSession: async (sessionId, title, projectPath, projectDir) => {
     const resolvedDir = projectPath
       ? null
-      : await window.clui.resolveSessionDir(sessionId).catch(() => null)
+      : projectDir
+        ? await window.clui.resolveProjectDir(projectDir).catch(() => null) || null
+        : await window.clui.resolveSessionDir(sessionId).catch(() => null) || null
     const defaultDir = projectPath || resolvedDir || get().staticInfo?.homePath || '~'
     const { tabId } = await window.clui.createTab()
 
@@ -599,7 +640,7 @@ export const useSessionStore = create<State>((set, get) => ({
             queuedPrompts: [...t.queuedPrompts, prompt],
             messages: [
               ...t.messages,
-              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
+              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now(), attachments: t.attachments.length > 0 ? [...t.attachments] : undefined },
             ],
           }
         }),
@@ -621,7 +662,7 @@ export const useSessionStore = create<State>((set, get) => ({
             queuedPrompts: [],
             messages: [
               ...withEffectiveBase.messages,
-              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
+              { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now(), attachments: t.attachments.length > 0 ? [...t.attachments] : undefined },
             ],
           }
         }),
@@ -863,8 +904,7 @@ export const useSessionStore = create<State>((set, get) => ({
             if (tabId !== activeTabId || !s.isExpanded) {
               updated.hasUnread = true
             }
-            // Show fallback card when tools were denied by permission settings
-            if (event.permissionDenials && event.permissionDenials.length > 0) {
+            if (event.permissionDenials && event.permissionDenials.length > 0 && s.permissionMode !== 'auto') {
               updated.permissionDenied = { tools: event.permissionDenials }
             } else {
               updated.permissionDenied = null

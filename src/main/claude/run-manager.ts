@@ -48,6 +48,7 @@ const SAFE_TOOLS = [
   'Agent', 'Task', 'TaskOutput',
   'Notebook',
   'WebSearch', 'WebFetch',
+  'ExitPlanMode', 'EnterPlanMode',
 ]
 
 // All tools to pre-approve when NO hook server is available (fallback path).
@@ -73,6 +74,7 @@ export interface RunHandle {
   sawPermissionRequest: boolean
   permissionDenials: Array<{ tool_name: string; tool_use_id: string }>
   keepAlive: boolean
+  model?: string
 }
 
 /**
@@ -146,10 +148,37 @@ export class RunManager extends EventEmitter {
   }
 
   private _decodeEncodedDir(encoded: string): string {
+    if (process.platform === 'win32') {
+      const parts = encoded.split('-')
+      const driveLetter = parts[0]
+      if (!driveLetter || driveLetter.length !== 1) return homedir()
+      const baseDir = driveLetter.toUpperCase() + ':\\'
+      const startIdx = parts.length > 1 && parts[1] === '' ? 2 : 1
+      return this._dfsDecodeWin(parts, startIdx, baseDir) || homedir()
+    }
     if (!encoded.startsWith('-')) return homedir()
     const parts = encoded.slice(1).split('-')
-    const result = this._dfsDecode(parts, 0, '')
-    return result || homedir()
+    return this._dfsDecode(parts, 0, '') || homedir()
+  }
+
+  private _dfsDecodeWin(parts: string[], idx: number, current: string): string | null {
+    if (idx >= parts.length) return existsSync(current) ? current : null
+    for (let take = 1; idx + take <= parts.length; take++) {
+      const component = parts.slice(idx, idx + take).join('-')
+      if (!component) continue
+      const next = join(current, component)
+      if (idx + take === parts.length) {
+        if (existsSync(next)) return next
+      } else {
+        try {
+          if (existsSync(next) && statSync(next).isDirectory()) {
+            const found = this._dfsDecodeWin(parts, idx + take, next)
+            if (found) return found
+          }
+        } catch {}
+      }
+    }
+    return null
   }
 
   private _dfsDecode(parts: string[], idx: number, current: string): string | null {
@@ -173,7 +202,8 @@ export class RunManager extends EventEmitter {
 
   startRun(requestId: string, options: RunOptions, flags?: { keepAlive?: boolean; skipPrompt?: boolean }): RunHandle {
     let cwd = options.projectPath === '~' ? homedir() : options.projectPath
-    if (options.sessionId) {
+    const hasExplicitPath = typeof options.projectPath === 'string' && options.projectPath.trim() !== '' && options.projectPath !== '~'
+    if (options.sessionId && !hasExplicitPath) {
       const sessionCwd = this._resolveSessionCwd(options.sessionId)
       if (sessionCwd) cwd = sessionCwd
     }
@@ -263,6 +293,7 @@ export class RunManager extends EventEmitter {
       sawPermissionRequest: false,
       permissionDenials: [],
       keepAlive: flags?.keepAlive ?? false,
+      model: options.model,
     }
 
     // ─── stdout → NDJSON parser → normalizer → events ───

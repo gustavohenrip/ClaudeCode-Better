@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning, Scroll, Plugs, Plus, X, Terminal, GlobeSimple, CaretLeft } from '@phosphor-icons/react'
+import { DotsThree, Bell, ArrowsOutSimple, Moon, Brain, Lightning, Scroll, Plugs, Plus, X, Terminal, GlobeSimple, CaretLeft, Trash } from '@phosphor-icons/react'
 import { useThemeStore, type EffortLevel } from '../theme'
 import { useSessionStore, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -95,7 +95,13 @@ export function SettingsPopover() {
   const thinkingEnabled = useThemeStore((s) => s.thinkingEnabled)
   const setThinkingEnabled = useThemeStore((s) => s.setThinkingEnabled)
   const globalRules = useThemeStore((s) => s.globalRules)
-  const setGlobalRules = useThemeStore((s) => s.setGlobalRules)
+  const rulesProfiles = useThemeStore((s) => s.rulesProfiles)
+  const activeProfileId = useThemeStore((s) => s.activeProfileId)
+  const setActiveProfile = useThemeStore((s) => s.setActiveProfile)
+  const createProfile = useThemeStore((s) => s.createProfile)
+  const updateProfileName = useThemeStore((s) => s.updateProfileName)
+  const setRulesContent = useThemeStore((s) => s.setRulesContent)
+  const deleteProfile = useThemeStore((s) => s.deleteProfile)
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const preferredModel = useSessionStore((s) => s.preferredModel)
   const supportsMaxEffort = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
@@ -110,6 +116,12 @@ export function SettingsPopover() {
 
   const [open, setOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<'settings' | 'rules' | 'mcp'>('settings')
+  const [showNewInput, setShowNewInput] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newNameErr, setNewNameErr] = useState('')
+  const [editName, setEditName] = useState('')
+  const [renameErr, setRenameErr] = useState('')
+  const isSwitchingProfileRef = useRef(false)
   const [mcpView, setMcpView] = useState<'list' | 'add'>('list')
   const [mcpType, setMcpType] = useState<'stdio' | 'http'>('stdio')
   const [mcpName, setMcpName] = useState('')
@@ -181,6 +193,44 @@ export function SettingsPopover() {
   const handleToggle = () => {
     if (!open) updatePos()
     setOpen((o) => !o)
+  }
+
+  useEffect(() => {
+    if (activeProfileId !== null) {
+      const p = rulesProfiles.find((p) => p.id === activeProfileId)
+      setEditName(p?.name ?? '')
+    }
+    setRenameErr('')
+  }, [activeProfileId])
+
+  const handleCreateProfile = () => {
+    if (!newName.trim()) { setNewNameErr('Name cannot be empty'); return }
+    const profile = createProfile(newName)
+    if (!profile) { setNewNameErr('Name already exists'); return }
+    setShowNewInput(false); setNewName(''); setNewNameErr('')
+  }
+
+  const handleNameBlur = () => {
+    if (isSwitchingProfileRef.current) { isSwitchingProfileRef.current = false; return }
+    if (!activeProfileId) return
+    if (!editName.trim()) {
+      setRenameErr('Name cannot be empty')
+      const p = rulesProfiles.find((p) => p.id === activeProfileId)
+      setEditName(p?.name ?? '')
+      return
+    }
+    const ok = updateProfileName(activeProfileId, editName)
+    if (!ok) {
+      setRenameErr('Name already exists')
+      const p = rulesProfiles.find((p) => p.id === activeProfileId)
+      setEditName(p?.name ?? '')
+    } else {
+      setRenameErr('')
+    }
+  }
+
+  const handleDeleteProfile = () => {
+    if (activeProfileId) { deleteProfile(activeProfileId); setRenameErr('') }
   }
 
   return (
@@ -325,30 +375,172 @@ export function SettingsPopover() {
             )}
 
             {activeTab === 'rules' && (
-              <div className="p-3 flex flex-col gap-2">
-                <div className="text-[10px] leading-[1.5]" style={{ color: colors.textTertiary }}>
-                  Applied as system prompt to every session across all directories.
+              <div style={{ overflow: 'auto', flex: 1, minHeight: 0 }}>
+                <div className="p-3 flex flex-col gap-2">
+                  <div className="text-[10px] leading-[1.5]" style={{ color: colors.textTertiary }}>
+                    Applied as system prompt to every session across all directories.
+                  </div>
+
+                  <div className="flex flex-wrap gap-1 items-center">
+                    <button
+                      type="button"
+                      onMouseDown={() => { isSwitchingProfileRef.current = true }}
+                      onClick={() => { setActiveProfile(null); setRenameErr('') }}
+                      className="text-[10px] px-2 py-0.5 rounded-md transition-colors"
+                      style={{
+                        background: activeProfileId === null ? colors.accent : colors.surfaceSecondary,
+                        color: activeProfileId === null ? '#fff' : colors.textSecondary,
+                        border: 'none',
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                      }}
+                    >
+                      None
+                    </button>
+                    {rulesProfiles.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onMouseDown={() => { isSwitchingProfileRef.current = true }}
+                        onClick={() => { setActiveProfile(p.id); setRenameErr('') }}
+                        className="text-[10px] px-2 py-0.5 rounded-md transition-colors"
+                        style={{
+                          background: activeProfileId === p.id ? colors.accent : colors.surfaceSecondary,
+                          color: activeProfileId === p.id ? '#fff' : colors.textSecondary,
+                          border: 'none',
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                          maxWidth: 80,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        title={p.name}
+                      >
+                        {p.name}
+                      </button>
+                    ))}
+                    {!showNewInput && (
+                      <button
+                        type="button"
+                        onClick={() => { setShowNewInput(true); setNewName(''); setNewNameErr('') }}
+                        className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-md transition-colors"
+                        style={{
+                          background: 'none',
+                          color: colors.textTertiary,
+                          border: `1px dashed ${colors.containerBorder}`,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Plus size={9} />
+                        New
+                      </button>
+                    )}
+                  </div>
+
+                  {showNewInput && (
+                    <div className="flex gap-1 items-center">
+                      <input
+                        autoFocus
+                        value={newName}
+                        onChange={(e) => { setNewName(e.target.value); setNewNameErr('') }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleCreateProfile()
+                          if (e.key === 'Escape') { setShowNewInput(false); setNewName(''); setNewNameErr('') }
+                        }}
+                        placeholder="Profile name..."
+                        className="flex-1 rounded-md"
+                        style={{
+                          background: colors.surfaceSecondary,
+                          border: `1px solid ${newNameErr ? '#ef4444' : colors.containerBorder}`,
+                          color: colors.textPrimary,
+                          padding: '3px 7px',
+                          outline: 'none',
+                          fontSize: 11,
+                          fontFamily: 'inherit',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleCreateProfile}
+                        className="text-[10px] px-2 py-0.5 rounded-md flex-shrink-0"
+                        style={{ background: colors.accent, color: '#fff', border: 'none', cursor: 'pointer' }}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setShowNewInput(false); setNewName(''); setNewNameErr('') }}
+                        className="flex items-center justify-center flex-shrink-0"
+                        style={{ background: 'none', color: colors.textTertiary, border: 'none', cursor: 'pointer', padding: 2 }}
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
+
+                  {newNameErr && (
+                    <div className="text-[10px]" style={{ color: '#ef4444' }}>{newNameErr}</div>
+                  )}
+
+                  {activeProfileId !== null && (
+                    <div className="flex gap-1 items-center">
+                      <input
+                        value={editName}
+                        onChange={(e) => { setEditName(e.target.value); setRenameErr('') }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                        onBlur={handleNameBlur}
+                        placeholder="Profile name..."
+                        className="flex-1 rounded-md"
+                        style={{
+                          background: colors.surfaceSecondary,
+                          border: `1px solid ${renameErr ? '#ef4444' : colors.containerBorder}`,
+                          color: colors.textPrimary,
+                          padding: '3px 7px',
+                          outline: 'none',
+                          fontSize: 11,
+                          fontFamily: 'inherit',
+                          fontWeight: 500,
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleDeleteProfile}
+                        className="flex items-center justify-center flex-shrink-0 rounded transition-opacity"
+                        style={{ background: 'none', color: '#c47060', border: 'none', cursor: 'pointer', padding: 3 }}
+                        title="Delete profile"
+                      >
+                        <Trash size={12} />
+                      </button>
+                    </div>
+                  )}
+
+                  {renameErr && (
+                    <div className="text-[10px]" style={{ color: '#ef4444' }}>{renameErr}</div>
+                  )}
+
+                  <textarea
+                    value={globalRules}
+                    onChange={(e) => setRulesContent(e.target.value)}
+                    placeholder={activeProfileId !== null ? 'Rules content for this profile...' : 'Always respond in Portuguese. Be concise...'}
+                    spellCheck={false}
+                    className="w-full rounded-lg resize-none"
+                    style={{
+                      height: activeProfileId !== null ? 120 : 150,
+                      background: colors.surfaceSecondary,
+                      border: `1px solid ${colors.containerBorder}`,
+                      color: colors.textPrimary,
+                      padding: '7px 9px',
+                      outline: 'none',
+                      fontFamily: 'inherit',
+                      fontSize: 11,
+                      lineHeight: 1.6,
+                    }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
+                    onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
+                  />
                 </div>
-                <textarea
-                  value={globalRules}
-                  onChange={(e) => setGlobalRules(e.target.value)}
-                  placeholder="Always respond in Portuguese. Be concise..."
-                  spellCheck={false}
-                  className="w-full rounded-lg resize-none"
-                  style={{
-                    height: 150,
-                    background: colors.surfaceSecondary,
-                    border: `1px solid ${colors.containerBorder}`,
-                    color: colors.textPrimary,
-                    padding: '7px 9px',
-                    outline: 'none',
-                    fontFamily: 'inherit',
-                    fontSize: 11,
-                    lineHeight: 1.6,
-                  }}
-                  onFocus={(e) => { e.currentTarget.style.borderColor = colors.inputFocusBorder }}
-                  onBlur={(e) => { e.currentTarget.style.borderColor = colors.containerBorder }}
-                />
               </div>
             )}
 

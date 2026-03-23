@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -8,11 +9,12 @@ import {
   SpinnerGap, ArrowCounterClockwise, Square, Brain,
 } from '@phosphor-icons/react'
 import { useSessionStore, useActiveTab } from '../stores/sessionStore'
+import { usePopoverLayer } from './PopoverLayer'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
 import { DiffViewer } from './DiffViewer'
 import { useColors, useThemeStore } from '../theme'
-import type { Message } from '../../shared/types'
+import type { Message, Attachment } from '../../shared/types'
 
 
 const INITIAL_RENDER_CAP = 100
@@ -59,6 +61,8 @@ export function ConversationView() {
   const tab = useActiveTab()
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const sendMessage = useSessionStore((s) => s.sendMessage)
+  const addAttachments = useSessionStore((s) => s.addAttachments)
+  const clearAttachments = useSessionStore((s) => s.clearAttachments)
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -143,6 +147,10 @@ export function ConversationView() {
   const handleRetry = () => {
     const lastUserMsg = [...tab.messages].reverse().find((m) => m.role === 'user')
     if (lastUserMsg) {
+      clearAttachments()
+      if (lastUserMsg.attachments && lastUserMsg.attachments.length > 0) {
+        addAttachments(lastUserMsg.attachments)
+      }
       sendMessage(lastUserMsg.content)
     }
   }
@@ -400,19 +408,133 @@ function InterruptButton({ tabId }: { tabId: string }) {
 }
 
 
-function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
-  const colors = useColors()
-  const content = (
-    <div
-      className="text-[13px] leading-[1.5] px-3 py-1.5 max-w-[85%]"
+function ImageLightbox({ src, name, onClose }: { src: string; name: string; onClose: () => void }) {
+  const layer = usePopoverLayer()
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  if (!layer) return null
+
+  return createPortal(
+    <motion.div
+      data-clui-ui
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.15 }}
+      onClick={onClose}
       style={{
-        background: colors.userBubble,
-        color: colors.userBubbleText,
-        border: `1px solid ${colors.userBubbleBorder}`,
-        borderRadius: '14px 14px 4px 14px',
+        position: 'absolute',
+        inset: 0,
+        background: 'rgba(0,0,0,0.82)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'zoom-out',
+        pointerEvents: 'auto',
       }}
     >
-      {message.content}
+      <motion.img
+        src={src}
+        alt={name}
+        initial={{ opacity: 0, scale: 0.88 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 28, mass: 0.7 }}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: '90vw',
+          maxHeight: '90vh',
+          objectFit: 'contain',
+          borderRadius: 12,
+          boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+          cursor: 'default',
+          display: 'block',
+        }}
+      />
+    </motion.div>,
+    layer
+  )
+}
+
+function UserMessageAttachments({ attachments }: { attachments: Attachment[] }) {
+  const colors = useColors()
+  const [lightbox, setLightbox] = useState<{ src: string; name: string } | null>(null)
+  const images = attachments.filter((a) => a.type === 'image' && a.dataUrl)
+  const files = attachments.filter((a) => !(a.type === 'image' && a.dataUrl))
+
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      {lightbox && (
+        <ImageLightbox src={lightbox.src} name={lightbox.name} onClose={() => setLightbox(null)} />
+      )}
+      {images.length > 0 && (
+        <div className={`flex gap-1.5 justify-end ${images.length > 1 ? 'flex-wrap' : ''}`}>
+          {images.map((a) => (
+            <img
+              key={a.id}
+              src={a.dataUrl}
+              alt={a.name}
+              title={a.name}
+              onClick={() => setLightbox({ src: a.dataUrl!, name: a.name })}
+              style={{
+                maxWidth: images.length === 1 ? 220 : 140,
+                maxHeight: images.length === 1 ? 180 : 120,
+                objectFit: 'contain',
+                borderRadius: 10,
+                display: 'block',
+                border: `1px solid ${colors.userBubbleBorder}`,
+                cursor: 'zoom-in',
+              }}
+            />
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-1 justify-end">
+          {files.map((a) => (
+            <div
+              key={a.id}
+              className="flex items-center gap-1 px-2 py-1 text-[11px]"
+              style={{
+                background: colors.userBubble,
+                border: `1px solid ${colors.userBubbleBorder}`,
+                borderRadius: 10,
+                color: colors.userBubbleText,
+              }}
+            >
+              <FileText size={11} />
+              <span className="truncate" style={{ maxWidth: 140 }}>{a.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
+  const colors = useColors()
+  const hasAttachments = (message.attachments?.length ?? 0) > 0
+
+  const content = (
+    <div className="flex flex-col items-end gap-1.5 max-w-[85%]">
+      {hasAttachments && <UserMessageAttachments attachments={message.attachments!} />}
+      {message.content.trim() && (
+        <div
+          className="text-[13px] leading-[1.5] px-3 py-1.5 w-full"
+          style={{
+            background: colors.userBubble,
+            color: colors.userBubbleText,
+            border: `1px solid ${colors.userBubbleBorder}`,
+            borderRadius: '14px 14px 4px 14px',
+          }}
+        >
+          {message.content}
+        </div>
+      )}
     </div>
   )
 
