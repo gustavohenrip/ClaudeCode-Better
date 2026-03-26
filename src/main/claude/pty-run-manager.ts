@@ -611,28 +611,29 @@ export class PtyRunManager extends EventEmitter {
 
     if (handle.permissionPhase === 'detecting' || handle.permissionPhase === 'idle') {
       this._checkPermissionInBuffer(requestId, handle, cleaned)
-      if (handle.permissionPhase === 'waiting_user') {
-        return
-      }
+    }
+    if (handle.permissionPhase === 'waiting_user') {
+      return
     }
 
     // ─── Detect tool calls ───
     const toolCall = parseToolCallLine(cleaned)
     if (toolCall) {
       handle.toolCallCount++
+      const toolIndex = handle.toolCallCount - 1
       this._flushText(requestId, handle)
       this.emit('normalized', requestId, {
         type: 'tool_call',
         toolName: toolCall.toolName,
         toolId: `pty-tool-${handle.toolCallCount}`,
-        index: handle.toolCallCount - 1,
+        index: toolIndex,
       } as NormalizedEvent)
 
       // Also emit tool_call_complete shortly after (we can't know exact timing from PTY)
       setTimeout(() => {
         this.emit('normalized', requestId, {
           type: 'tool_call_complete',
-          index: handle.toolCallCount - 1,
+          index: toolIndex,
         } as NormalizedEvent)
       }, 100)
       return

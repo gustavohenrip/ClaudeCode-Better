@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database } from '@phosphor-icons/react'
 import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useCodexQuota } from '../hooks/useCodexQuota'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
 
@@ -16,22 +17,24 @@ function ProviderToggle() {
   const tab = useActiveTab()
   const colors = useColors()
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
+  const isCodex = provider === 'codex'
+  const { quota } = useCodexQuota(isCodex)
 
   const [tooltip, setTooltip] = useState('')
 
   useEffect(() => {
-    if (provider !== 'codex') {
+    if (!isCodex) {
       setTooltip('Switch to Codex')
       return
     }
-    window.clui.codexQuota().then((q) => {
-      const pLeft = 100 - Math.round(q.primaryUsedPercent)
-      const sLeft = 100 - Math.round(q.secondaryUsedPercent)
-      setTooltip(`${q.planType} | 5h: ${pLeft}% left | 7d: ${sLeft}% left`)
-    }).catch(() => setTooltip('Switch to Claude'))
-  }, [provider, tab?.lastResult])
-
-  const isCodex = provider === 'codex'
+    if (!quota) {
+      setTooltip('Loading Codex quota...')
+      return
+    }
+    const pLeft = Math.max(0, 100 - Math.round(quota.primaryUsedPercent))
+    const sLeft = Math.max(0, 100 - Math.round(quota.secondaryUsedPercent))
+    setTooltip(`${quota.planType} | 5h: ${pLeft}% left | 7d: ${sLeft}% left`)
+  }, [isCodex, quota])
 
   return (
     <motion.button
@@ -63,10 +66,7 @@ function ModelPicker() {
   const preferredClaudeModel = useSessionStore((s) => s.preferredModel)
   const preferredCodexModel = useSessionStore((s) => s.preferredCodexModel)
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
-  const tab = useSessionStore(
-    (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b && a.status === b.status && a.sessionModel === b.sessionModel && a.provider === b.provider),
-  )
+  const tab = useActiveTab()
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
@@ -501,17 +501,7 @@ function compactPath(fullPath: string): string {
 }
 
 export function StatusBar() {
-  const tab = useSessionStore(
-    (s) => s.tabs.find((t) => t.id === s.activeTabId),
-    (a, b) => a === b || (!!a && !!b
-      && a.status === b.status
-      && a.provider === b.provider
-      && a.additionalDirs === b.additionalDirs
-      && a.hasChosenDirectory === b.hasChosenDirectory
-      && a.workingDirectory === b.workingDirectory
-      && a.claudeSessionId === b.claudeSessionId
-    ),
-  )
+  const tab = useActiveTab()
   const addDirectory = useSessionStore((s) => s.addDirectory)
   const removeDirectory = useSessionStore((s) => s.removeDirectory)
   const popoverLayer = usePopoverLayer()

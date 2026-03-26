@@ -212,6 +212,7 @@ export type NormalizedEvent =
   | { type: 'error'; message: string; isError: boolean; sessionId?: string }
   | { type: 'session_dead'; exitCode: number | null; signal: string | null; stderrTail: string[] }
   | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
+  | { type: 'codex_rate_limits'; rateLimits: Record<string, unknown> }
   | { type: 'usage'; usage: UsageData }
   | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
   | { type: 'compact_complete'; clearedTokens: number }

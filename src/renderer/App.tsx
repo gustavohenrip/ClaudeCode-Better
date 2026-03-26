@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useState, lazy, Suspense } from 'react'
+import React, { useEffect, useCallback, useState, useRef, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Paperclip, Camera, HeadCircuit } from '@phosphor-icons/react'
 import { TabStrip } from './components/TabStrip'
@@ -8,18 +8,18 @@ import { StatusBar } from './components/StatusBar'
 const MarketplacePanel = lazy(() => import('./components/MarketplacePanel').then((m) => ({ default: m.MarketplacePanel })))
 import { PopoverLayerProvider } from './components/PopoverLayer'
 import { useClaudeEvents } from './hooks/useClaudeEvents'
+import { useCodexQuota } from './hooks/useCodexQuota'
 import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore, useActiveTab } from './stores/sessionStore'
 import { useColors, useThemeStore, spacing } from './theme'
 import { setWindowVisibility } from './stores/sessionStore'
-import type { CodexQuota } from '../shared/types'
 
-function formatResetTime(unixTs: number): string {
+function formatResetTime(unixTs: number, nowMs: number): string {
   if (!unixTs) return ''
   const d = new Date(unixTs * 1000)
-  const now = new Date()
-  const diffMs = d.getTime() - now.getTime()
-  if (diffMs <= 0) return 'full'
+  const diffMs = d.getTime() - nowMs
+  if (diffMs <= 0) return '<1m'
+  if (diffMs < 60000) return '<1m'
   const diffH = Math.floor(diffMs / 3600000)
   const diffM = Math.floor((diffMs % 3600000) / 60000)
   if (diffH >= 24) {
@@ -40,30 +40,20 @@ function windowLabel(minutes: number): string {
 function CodexQuotaWidget() {
   const tab = useActiveTab()
   const colors = useColors()
-  const [quota, setQuota] = useState<CodexQuota | null>(null)
 
   const isCodex = tab?.provider === 'codex'
-  const lastResult = tab?.lastResult
-
-  useEffect(() => {
-    if (!isCodex) { setQuota(null); return }
-    const load = () => { window.clui.codexQuota().then(setQuota).catch(() => {}) }
-    load()
-    const iv = setInterval(load, 3000)
-    const unsub = window.clui.onCodexQuotaUpdate((q) => { if (q) setQuota(q) })
-    return () => { clearInterval(iv); unsub() }
-  }, [isCodex, lastResult])
+  const { quota, nowMs } = useCodexQuota(isCodex)
 
   if (!isCodex || !quota) return null
 
-  const pUsed = Math.round(quota.primaryUsedPercent)
-  const pLeft = 100 - pUsed
-  const sUsed = Math.round(quota.secondaryUsedPercent)
-  const sLeft = 100 - sUsed
+  const pUsed = Math.max(0, Math.min(100, Math.round(quota.primaryUsedPercent)))
+  const pLeft = Math.max(0, 100 - pUsed)
+  const sUsed = Math.max(0, Math.min(100, Math.round(quota.secondaryUsedPercent)))
+  const sLeft = Math.max(0, 100 - sUsed)
   const pLabel = windowLabel(quota.primaryWindowMinutes)
   const sLabel = windowLabel(quota.secondaryWindowMinutes)
-  const pReset = formatResetTime(quota.primaryResetsAt)
-  const sReset = formatResetTime(quota.secondaryResetsAt)
+  const pReset = formatResetTime(quota.primaryResetsAt, nowMs)
+  const sReset = formatResetTime(quota.secondaryResetsAt, nowMs)
 
   const barColor = (leftPct: number) => {
     if (leftPct <= 5) return '#c47060'
@@ -91,7 +81,7 @@ function CodexQuotaWidget() {
     >
       <QuotaBar
         label={pLabel}
-        usedPct={pUsed}
+        fillPct={pLeft}
         leftPct={pLeft}
         resetStr={pReset}
         fill={barColor(pLeft)}
@@ -101,7 +91,7 @@ function CodexQuotaWidget() {
       />
       <QuotaBar
         label={sLabel}
-        usedPct={sUsed}
+        fillPct={sLeft}
         leftPct={sLeft}
         resetStr={sReset}
         fill={barColor(sLeft)}
@@ -113,8 +103,8 @@ function CodexQuotaWidget() {
   )
 }
 
-function QuotaBar({ label, usedPct, leftPct, resetStr, fill, text, textHighlight, track }: {
-  label: string; usedPct: number; leftPct: number; resetStr: string; fill: string; text: string; textHighlight: string; track: string
+function QuotaBar({ label, fillPct, leftPct, resetStr, fill, text, textHighlight, track }: {
+  label: string; fillPct: number; leftPct: number; resetStr: string; fill: string; text: string; textHighlight: string; track: string
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -123,7 +113,7 @@ function QuotaBar({ label, usedPct, leftPct, resetStr, fill, text, textHighlight
         <motion.div
           style={{ height: '100%', borderRadius: 3, background: fill }}
           initial={false}
-          animate={{ width: `${usedPct}%` }}
+          animate={{ width: `${fillPct}%` }}
           transition={{ duration: 0.4, ease: 'easeOut' }}
         />
       </div>
@@ -161,6 +151,7 @@ export default function App() {
   const setSystemTheme = useThemeStore((s) => s.setSystemTheme)
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const [windowVisible, setWindowVisible] = useState(false)
+  const bootstrappedRef = useRef(false)
 
   useEffect(() => {
     const unsub = window.clui.onWindowShown(() => { setWindowVisible(true); setWindowVisibility(true) })
@@ -181,6 +172,9 @@ export default function App() {
   }, [setSystemTheme])
 
   useEffect(() => {
+    if (bootstrappedRef.current) return
+    bootstrappedRef.current = true
+
     const savedMode = useSessionStore.getState().permissionMode
     if (savedMode !== 'ask') {
       window.clui.setPermissionMode(savedMode)

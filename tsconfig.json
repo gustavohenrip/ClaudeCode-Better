@@ -8,6 +8,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    "allowArbitraryExtensions": true,
     "isolatedModules": true,
     "declaration": true,
     "jsx": "react-jsx"

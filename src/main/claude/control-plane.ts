@@ -860,6 +860,11 @@ export class ControlPlane extends EventEmitter {
     } catch (err) {
       tab.activeRequestId = null
       tab.runPid = null
+      const runToken = this.runTokens.get(requestId)
+      if (runToken) {
+        this.permissionServer.unregisterRun(runToken)
+        this.runTokens.delete(requestId)
+      }
       this._setTabStatus(tabId, 'failed')
       throw err
     }

@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
 import { useThemeStore, type EffortLevel } from '../theme'
-import notificationSrc from '../../../resources/notification.mp3'
+
+const notificationSrc = new URL('../../../resources/notification.mp3', import.meta.url).href
 
 // ─── Known models ───
 
@@ -102,7 +103,7 @@ interface State {
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
-  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: string) => Promise<string>
+  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: 'claude' | 'codex') => Promise<string>
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
@@ -848,15 +849,6 @@ export const useSessionStore = create<State>((set, get) => ({
           }
 
           case 'task_update': {
-            if (event.message?.usage) {
-              const u = event.message.usage
-              updated.tokenUsage = {
-                input: (updated.tokenUsage?.input || 0) + (u.input_tokens || 0),
-                output: (updated.tokenUsage?.output || 0) + (u.output_tokens || 0),
-                cacheRead: (updated.tokenUsage?.cacheRead || 0) + (u.cache_read_input_tokens || 0),
-                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + (u.cache_creation_input_tokens || 0),
-              }
-            }
             if (event.message?.content) {
               const lastUserIdx = (() => {
                 for (let i = updated.messages.length - 1; i >= 0; i--) {

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard, Notification } from 'electron'
+import type { OpenDialogOptions } from 'electron'
 import { join, resolve, dirname, isAbsolute } from 'path'
 import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync, watch as fsWatch, type FSWatcher } from 'fs'
 import { execFile } from 'child_process'
@@ -11,7 +12,7 @@ import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './m
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, EnrichedError } from '../shared/types'
+import type { RunOptions, NormalizedEvent, EnrichedError, CodexQuota } from '../shared/types'
 
 const DEBUG_MODE = process.env.CLUI_DEBUG === '1'
 const SPACES_DEBUG = DEBUG_MODE || process.env.CLUI_SPACES_DEBUG === '1'
@@ -132,19 +133,7 @@ function scheduleToggleSnapshots(toggleId: number, phase: 'show' | 'hide'): void
 controlPlane.on('event', (tabId: string, event: NormalizedEvent) => {
   const evt = event as any
   if (evt.type === 'codex_rate_limits' && evt.rateLimits) {
-    const rl = evt.rateLimits
-    const p = rl.primary || {}
-    const s = rl.secondary || {}
-    cachedCodexQuota = {
-      primaryUsedPercent: p.used_percent ?? 0,
-      primaryWindowMinutes: p.window_minutes ?? 300,
-      primaryResetsAt: p.resets_at ?? 0,
-      secondaryUsedPercent: s.used_percent ?? 0,
-      secondaryWindowMinutes: s.window_minutes ?? 10080,
-      secondaryResetsAt: s.resets_at ?? 0,
-      planType: rl.plan_type || 'unknown',
-    }
-    broadcast('clui:codex-quota-update', cachedCodexQuota)
+    storeCodexQuota(buildQuotaFromRateLimits(evt.rateLimits), { requestPing: false })
     return
   }
   broadcast('clui:normalized-event', tabId, event)
@@ -154,8 +143,7 @@ controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatu
   broadcast('clui:tab-status-change', tabId, newStatus, oldStatus)
   if (newStatus === 'completed' && oldStatus === 'running') {
     setTimeout(() => {
-      const fresh = refreshCodexQuota()
-      broadcast('clui:codex-quota-update', fresh)
+      syncCodexQuota({ reason: 'tab-complete', forceBroadcast: true })
     }, 500)
   }
 })
@@ -384,12 +372,17 @@ ipcMain.handle(IPC.CREATE_TAB, (_event, provider?: string) => {
   return { tabId }
 })
 
-let cachedCodexQuota: import('../shared/types').CodexQuota | null = null
-let quotaWatchers: FSWatcher[] = []
-let quotaWatchedDirs = new Set<string>()
+let cachedCodexQuota: CodexQuota | null = null
+let quotaWatchers = new Map<string, FSWatcher>()
 let quotaWatchDebounce: ReturnType<typeof setTimeout> | null = null
+let quotaResetTimer: ReturnType<typeof setTimeout> | null = null
+let quotaRefreshInterval: ReturnType<typeof setInterval> | null = null
+let quotaLastUpdatedAt = 0
 
-const QUOTA_FALLBACK: import('../shared/types').CodexQuota = {
+const QUOTA_LOOKBACK_DAYS = 14
+const QUOTA_BACKGROUND_REFRESH_MS = 3_000
+
+const QUOTA_FALLBACK: CodexQuota = {
   primaryUsedPercent: 0, primaryWindowMinutes: 300, primaryResetsAt: 0,
   secondaryUsedPercent: 0, secondaryWindowMinutes: 10080, secondaryResetsAt: 0,
   planType: 'unknown',
@@ -397,22 +390,125 @@ const QUOTA_FALLBACK: import('../shared/types').CodexQuota = {
 
 let quotaPingInFlight = false
 
-function applyQuotaResets(q: import('../shared/types').CodexQuota): import('../shared/types').CodexQuota {
+function clampPercent(value: number | undefined, fallback: number = 0): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  return Math.max(0, Math.min(100, n))
+}
+
+function normalizeQuota(raw?: Partial<CodexQuota> | null): CodexQuota {
+  return {
+    primaryUsedPercent: clampPercent(raw?.primaryUsedPercent, QUOTA_FALLBACK.primaryUsedPercent),
+    primaryWindowMinutes: raw?.primaryWindowMinutes && raw.primaryWindowMinutes > 0 ? raw.primaryWindowMinutes : QUOTA_FALLBACK.primaryWindowMinutes,
+    primaryResetsAt: raw?.primaryResetsAt && raw.primaryResetsAt > 0 ? raw.primaryResetsAt : 0,
+    secondaryUsedPercent: clampPercent(raw?.secondaryUsedPercent, QUOTA_FALLBACK.secondaryUsedPercent),
+    secondaryWindowMinutes: raw?.secondaryWindowMinutes && raw.secondaryWindowMinutes > 0 ? raw.secondaryWindowMinutes : QUOTA_FALLBACK.secondaryWindowMinutes,
+    secondaryResetsAt: raw?.secondaryResetsAt && raw.secondaryResetsAt > 0 ? raw.secondaryResetsAt : 0,
+    planType: typeof raw?.planType === 'string' && raw.planType.trim() ? raw.planType : QUOTA_FALLBACK.planType,
+  }
+}
+
+function quotasEqual(a: CodexQuota | null | undefined, b: CodexQuota | null | undefined): boolean {
+  if (!a || !b) return a === b
+  return (
+    a.primaryUsedPercent === b.primaryUsedPercent &&
+    a.primaryWindowMinutes === b.primaryWindowMinutes &&
+    a.primaryResetsAt === b.primaryResetsAt &&
+    a.secondaryUsedPercent === b.secondaryUsedPercent &&
+    a.secondaryWindowMinutes === b.secondaryWindowMinutes &&
+    a.secondaryResetsAt === b.secondaryResetsAt &&
+    a.planType === b.planType
+  )
+}
+
+function buildQuotaFromRateLimits(rateLimits: any): CodexQuota {
+  const rl = rateLimits || {}
+  const p = rl.primary || {}
+  const s = rl.secondary || {}
+  return normalizeQuota({
+    primaryUsedPercent: p.used_percent,
+    primaryWindowMinutes: p.window_minutes,
+    primaryResetsAt: p.resets_at,
+    secondaryUsedPercent: s.used_percent,
+    secondaryWindowMinutes: s.window_minutes,
+    secondaryResetsAt: s.resets_at,
+    planType: rl.plan_type,
+  })
+}
+
+function rollResetForward(resetAt: number, windowMinutes: number, nowSec: number): number {
+  if (!resetAt || windowMinutes <= 0) return resetAt
+  const windowSec = Math.max(60, Math.round(windowMinutes * 60))
+  if (resetAt > nowSec) return resetAt
+  const windowsMissed = Math.floor((nowSec - resetAt) / windowSec) + 1
+  return resetAt + windowsMissed * windowSec
+}
+
+function requestQuotaPing(): void {
+  if (quotaPingInFlight) return
+  quotaPingInFlight = true
+  pingCodexForQuota()
+}
+
+function applyQuotaResets(q: CodexQuota): { quota: CodexQuota; adjustedExpiredReset: boolean } {
   const nowSec = Math.floor(Date.now() / 1000)
-  let stale = false
-  if (q.primaryResetsAt && q.primaryResetsAt < nowSec) {
-    q.primaryUsedPercent = 0
-    stale = true
+  const next = normalizeQuota(q)
+  let adjustedExpiredReset = false
+
+  if (next.primaryResetsAt && next.primaryResetsAt <= nowSec) {
+    next.primaryResetsAt = rollResetForward(next.primaryResetsAt, next.primaryWindowMinutes, nowSec)
+    adjustedExpiredReset = true
   }
-  if (q.secondaryResetsAt && q.secondaryResetsAt < nowSec) {
-    q.secondaryUsedPercent = 0
-    stale = true
+
+  if (next.secondaryResetsAt && next.secondaryResetsAt <= nowSec) {
+    next.secondaryResetsAt = rollResetForward(next.secondaryResetsAt, next.secondaryWindowMinutes, nowSec)
+    adjustedExpiredReset = true
   }
-  if (stale && !quotaPingInFlight) {
-    quotaPingInFlight = true
-    pingCodexForQuota()
+
+  if (adjustedExpiredReset) {
+    requestQuotaPing()
   }
-  return q
+
+  return { quota: next, adjustedExpiredReset }
+}
+
+function scheduleQuotaResetRefresh(quota: CodexQuota): void {
+  if (quotaResetTimer) {
+    clearTimeout(quotaResetTimer)
+    quotaResetTimer = null
+  }
+
+  const nowMs = Date.now()
+  const nextResetMs = [quota.primaryResetsAt, quota.secondaryResetsAt]
+    .filter((ts) => ts > 0)
+    .map((ts) => ts * 1000)
+    .filter((ts) => ts > nowMs)
+    .sort((a, b) => a - b)[0]
+
+  if (!nextResetMs) return
+
+  const delayMs = Math.max(250, Math.min(nextResetMs - nowMs + 250, 2_147_483_647))
+  quotaResetTimer = setTimeout(() => {
+    syncCodexQuota({ reason: 'reset-timer', forceBroadcast: true, requestPing: true })
+  }, delayMs)
+}
+
+function storeCodexQuota(nextQuota: CodexQuota, options?: { broadcast?: boolean; forceBroadcast?: boolean; requestPing?: boolean }): CodexQuota {
+  const previous = cachedCodexQuota
+  const { quota, adjustedExpiredReset } = applyQuotaResets(nextQuota)
+  cachedCodexQuota = quota
+  quotaLastUpdatedAt = Date.now()
+  scheduleQuotaResetRefresh(quota)
+
+  if (options?.requestPing || adjustedExpiredReset) {
+    requestQuotaPing()
+  }
+
+  const shouldBroadcast = options?.broadcast !== false && (options?.forceBroadcast || !quotasEqual(previous, quota))
+  if (shouldBroadcast) {
+    broadcast('clui:codex-quota-update', quota)
+  }
+
+  return quota
 }
 
 function findCodexBin(): string {
@@ -428,55 +524,130 @@ function pingCodexForQuota(): void {
     stdio: ['pipe', 'pipe', 'ignore'],
     env: { ...process.env, PATH: `${dirname(codexBin)}:${process.env.PATH || ''}` },
   })
+  let finalized = false
+  const finalize = () => {
+    if (finalized) return
+    finalized = true
+    quotaPingInFlight = false
+  }
+  child.stdout?.on('data', () => {})
   child.stdin.write('hi')
   child.stdin.end()
+  const killTimer = setTimeout(() => {
+    try { child.kill() } catch {}
+    setTimeout(() => { finalize() }, 1000)
+  }, 15000)
   child.on('close', () => {
-    quotaPingInFlight = false
+    clearTimeout(killTimer)
+    finalize()
     setTimeout(() => {
-      const fresh = refreshCodexQuota()
-      broadcast('clui:codex-quota-update', fresh)
+      syncCodexQuota({ reason: 'ping-close', forceBroadcast: true })
     }, 300)
   })
-  child.on('error', () => { quotaPingInFlight = false })
-  setTimeout(() => { try { child.kill() } catch {} }, 15000)
+  child.on('error', () => {
+    clearTimeout(killTimer)
+    finalize()
+  })
 }
 
-function refreshCodexQuota(): import('../shared/types').CodexQuota {
+function collectRecentQuotaDirs(): string[] {
+  const sessionsBase = join(homedir(), '.codex', 'sessions')
+  if (!existsSync(sessionsBase)) return []
+
   try {
-    const sessionsBase = join(homedir(), '.codex', 'sessions')
-    if (!existsSync(sessionsBase)) return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
-    const now = new Date()
-    const candidates: string[] = []
-    for (let d = 0; d < 3; d++) {
-      const date = new Date(now)
-      date.setDate(date.getDate() - d)
-      const ymd = date.toISOString().slice(0, 10).split('-')
-      const dir = join(sessionsBase, ymd[0], ymd[1], ymd[2])
-      if (existsSync(dir)) {
-        const files = readdirSync(dir).filter((f: string) => f.endsWith('.jsonl')).map((f: string) => join(dir, f))
-        candidates.push(...files)
-        setupQuotaWatcher(dir)
+    const dirs: Array<{ key: string; path: string }> = []
+    for (const year of readdirSync(sessionsBase)) {
+      const yearDir = join(sessionsBase, year)
+      let yearStat
+      try { yearStat = statSync(yearDir) } catch { continue }
+      if (!yearStat.isDirectory()) continue
+
+      for (const month of readdirSync(yearDir)) {
+        const monthDir = join(yearDir, month)
+        let monthStat
+        try { monthStat = statSync(monthDir) } catch { continue }
+        if (!monthStat.isDirectory()) continue
+
+        for (const day of readdirSync(monthDir)) {
+          const dayDir = join(monthDir, day)
+          let dayStat
+          try { dayStat = statSync(dayDir) } catch { continue }
+          if (!dayStat.isDirectory()) continue
+          dirs.push({ key: `${year}-${month}-${day}`, path: dayDir })
+        }
       }
     }
-    if (candidates.length === 0) return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
-    candidates.sort((a, b) => {
-      try { return statSync(b).mtimeMs - statSync(a).mtimeMs } catch { return 0 }
-    })
-    for (const file of candidates.slice(0, 5)) {
-      const result = extractRateLimitsFromRollout(file)
-      if (result) {
-        cachedCodexQuota = applyQuotaResets(result)
-        return cachedCodexQuota
-      }
-    }
-    return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+
+    dirs.sort((a, b) => b.key.localeCompare(a.key))
+    return dirs.slice(0, QUOTA_LOOKBACK_DAYS).map((dir) => dir.path)
   } catch {
-    return applyQuotaResets(cachedCodexQuota || QUOTA_FALLBACK)
+    return []
   }
 }
 
-function extractRateLimitsFromRollout(filePath: string): import('../shared/types').CodexQuota | null {
+function setupQuotaWatchers(dirPaths: string[]): void {
+  const sessionsBase = join(homedir(), '.codex', 'sessions')
+  if (!existsSync(sessionsBase)) return
+
+  const desired = new Set<string>([sessionsBase])
+
+  for (const dir of dirPaths) {
+    desired.add(dir)
+    const monthDir = dirname(dir)
+    const yearDir = dirname(monthDir)
+    if (monthDir.startsWith(sessionsBase)) desired.add(monthDir)
+    if (yearDir.startsWith(sessionsBase)) desired.add(yearDir)
+  }
+
+  for (const dir of desired) {
+    setupQuotaWatcher(dir)
+  }
+
+  for (const [dir, watcher] of quotaWatchers) {
+    if (desired.has(dir)) continue
+    try { watcher.close() } catch {}
+    quotaWatchers.delete(dir)
+  }
+}
+
+function refreshCodexQuota(): CodexQuota {
   try {
+    const recentDirs = collectRecentQuotaDirs()
+    setupQuotaWatchers(recentDirs)
+
+    const candidates: string[] = []
+    for (const dir of recentDirs) {
+      const files = readdirSync(dir)
+        .filter((f: string) => f.startsWith('rollout-') && f.endsWith('.jsonl'))
+        .map((f: string) => join(dir, f))
+      candidates.push(...files)
+    }
+
+    if (candidates.length === 0) return normalizeQuota(cachedCodexQuota || QUOTA_FALLBACK)
+
+    candidates.sort((a, b) => {
+      try { return statSync(b).mtimeMs - statSync(a).mtimeMs } catch { return 0 }
+    })
+
+    let best: { quota: CodexQuota; observedAt: number } | null = null
+    for (const file of candidates) {
+      const result = extractRateLimitsFromRollout(file)
+      if (result && (!best || result.observedAt > best.observedAt)) {
+        best = result
+      }
+    }
+
+    return best?.quota || normalizeQuota(cachedCodexQuota || QUOTA_FALLBACK)
+  } catch {
+    return normalizeQuota(cachedCodexQuota || QUOTA_FALLBACK)
+  }
+}
+
+function extractRateLimitsFromRollout(filePath: string): { quota: CodexQuota; observedAt: number } | null {
+  try {
+    let fallbackObservedAt = 0
+    try { fallbackObservedAt = statSync(filePath).mtimeMs } catch {}
+
     const content = readFileSync(filePath, 'utf-8')
     const lines = content.split('\n').filter((l: string) => l.trim())
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -484,17 +655,9 @@ function extractRateLimitsFromRollout(filePath: string): import('../shared/types
         const obj = JSON.parse(lines[i])
         const payload = obj.payload || obj
         if (payload.type === 'token_count' && payload.rate_limits) {
-          const rl = payload.rate_limits
-          const p = rl.primary || {}
-          const s = rl.secondary || {}
           return {
-            primaryUsedPercent: p.used_percent ?? 0,
-            primaryWindowMinutes: p.window_minutes ?? 300,
-            primaryResetsAt: p.resets_at ?? 0,
-            secondaryUsedPercent: s.used_percent ?? 0,
-            secondaryWindowMinutes: s.window_minutes ?? 10080,
-            secondaryResetsAt: s.resets_at ?? 0,
-            planType: rl.plan_type || 'unknown',
+            quota: buildQuotaFromRateLimits(payload.rate_limits),
+            observedAt: typeof obj.timestamp === 'string' ? Date.parse(obj.timestamp) || fallbackObservedAt : fallbackObservedAt,
           }
         }
       } catch {}
@@ -506,31 +669,56 @@ function extractRateLimitsFromRollout(filePath: string): import('../shared/types
 }
 
 function setupQuotaWatcher(dir: string): void {
-  if (quotaWatchedDirs.has(dir)) return
-  quotaWatchedDirs.add(dir)
+  if (quotaWatchers.has(dir)) return
   try {
     const watcher = fsWatch(dir, { persistent: false }, () => {
       if (quotaWatchDebounce) clearTimeout(quotaWatchDebounce)
       quotaWatchDebounce = setTimeout(() => {
-        const prev = cachedCodexQuota
-        const fresh = refreshCodexQuota()
-        if (!prev || fresh.primaryUsedPercent !== prev.primaryUsedPercent || fresh.secondaryUsedPercent !== prev.secondaryUsedPercent) {
-          broadcast('clui:codex-quota-update', fresh)
-        }
+        syncCodexQuota({ reason: `fs-watch:${dir}` })
       }, 300)
     })
-    quotaWatchers.push(watcher)
+    watcher.on('error', () => {
+      try { watcher.close() } catch {}
+      quotaWatchers.delete(dir)
+    })
+    quotaWatchers.set(dir, watcher)
   } catch {}
 }
 
+function syncCodexQuota(options?: { broadcast?: boolean; forceBroadcast?: boolean; reason?: string; requestPing?: boolean }): CodexQuota {
+  const fresh = refreshCodexQuota()
+  return storeCodexQuota(fresh, options)
+}
+
+function startQuotaMonitoring(): void {
+  syncCodexQuota({ broadcast: false, reason: 'startup' })
+  requestQuotaPing()
+  if (quotaRefreshInterval) clearInterval(quotaRefreshInterval)
+  quotaRefreshInterval = setInterval(() => {
+    syncCodexQuota({ reason: 'background-refresh' })
+  }, QUOTA_BACKGROUND_REFRESH_MS)
+}
+
 function cleanupQuotaWatchers(): void {
-  for (const w of quotaWatchers) { try { w.close() } catch {} }
-  quotaWatchers = []
-  quotaWatchedDirs.clear()
+  if (quotaWatchDebounce) {
+    clearTimeout(quotaWatchDebounce)
+    quotaWatchDebounce = null
+  }
+  if (quotaResetTimer) {
+    clearTimeout(quotaResetTimer)
+    quotaResetTimer = null
+  }
+  if (quotaRefreshInterval) {
+    clearInterval(quotaRefreshInterval)
+    quotaRefreshInterval = null
+  }
+  for (const [, w] of quotaWatchers) { try { w.close() } catch {} }
+  quotaWatchers.clear()
 }
 
 ipcMain.handle(IPC.CODEX_QUOTA, () => {
-  return refreshCodexQuota()
+  const shouldPing = Date.now() - quotaLastUpdatedAt > 12_000
+  return syncCodexQuota({ broadcast: false, reason: 'ipc-request', requestPing: shouldPing })
 })
 
 ipcMain.on(IPC.INIT_SESSION, (_event, tabId: string, systemPrompt?: string) => {
@@ -1050,7 +1238,7 @@ ipcMain.handle(IPC.SELECT_DIRECTORY, async () => {
   // Unparented avoids modal dimming on the transparent overlay.
   // Activation is fine here — user is actively interacting with CLUI.
   if (process.platform === 'darwin') app.focus()
-  const options = { properties: ['openDirectory'] as const }
+  const options: OpenDialogOptions = { properties: ['openDirectory'] }
   const result = process.platform === 'darwin'
     ? await dialog.showOpenDialog(options)
     : await dialog.showOpenDialog(mainWindow, options)
@@ -1072,7 +1260,7 @@ ipcMain.handle(IPC.ATTACH_FILES, async () => {
   if (!mainWindow) return null
   // macOS: activate app so unparented dialog appears on top
   if (process.platform === 'darwin') app.focus()
-  const options = {
+  const options: OpenDialogOptions = {
     properties: ['openFile', 'multiSelections'],
     filters: [
       { name: 'All Files', extensions: ['*'] },
@@ -1607,6 +1795,7 @@ app.whenReady().then(async () => {
     broadcast(IPC.SKILL_STATUS, status)
   }).catch((err: Error) => log(`Skill provisioning error: ${err.message}`))
 
+  startQuotaMonitoring()
   createWindow()
   snapshotWindowState('after createWindow')
 

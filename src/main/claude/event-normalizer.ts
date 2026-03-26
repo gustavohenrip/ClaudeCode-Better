@@ -184,13 +184,17 @@ function normalizePermission(event: PermissionEvent): NormalizedEvent[] {
 }
 
 export function normalizeCodex(raw: any): NormalizedEvent[] {
-  if (!raw || !raw.type) return []
+  const evt = raw?.type === 'event_msg' && raw?.payload
+    ? raw.payload
+    : raw
 
-  switch (raw.type) {
+  if (!evt || !evt.type) return []
+
+  switch (evt.type) {
     case 'thread.started':
       return [{
         type: 'session_init',
-        sessionId: raw.thread_id || '',
+        sessionId: evt.thread_id || '',
         tools: [],
         model: 'codex',
         mcpServers: [],
@@ -202,7 +206,7 @@ export function normalizeCodex(raw: any): NormalizedEvent[] {
       return []
 
     case 'turn.completed': {
-      const u = raw.usage || {}
+      const u = evt.usage || {}
       return [{
         type: 'task_complete',
         result: '',
@@ -214,51 +218,51 @@ export function normalizeCodex(raw: any): NormalizedEvent[] {
           output_tokens: u.output_tokens || 0,
           cache_read_input_tokens: u.cached_input_tokens || 0,
         },
-        sessionId: raw.thread_id || '',
+        sessionId: evt.thread_id || '',
       }]
     }
 
     case 'turn.failed':
       return [{
         type: 'error',
-        message: raw.error?.message || 'Codex turn failed',
+        message: evt.error?.message || 'Codex turn failed',
         isError: true,
-        sessionId: raw.thread_id || '',
+        sessionId: evt.thread_id || '',
       }]
 
     case 'error': {
-      if (raw.message && raw.message.startsWith('Reconnecting')) return []
+      if (evt.message && evt.message.startsWith('Reconnecting')) return []
       return [{
         type: 'error',
-        message: raw.message || 'Unknown Codex error',
+        message: evt.message || 'Unknown Codex error',
         isError: true,
       }]
     }
 
     case 'token_count': {
-      if (raw.rate_limits) {
+      if (evt.rate_limits) {
         return [{
-          type: 'codex_rate_limits' as any,
-          rateLimits: raw.rate_limits,
+          type: 'codex_rate_limits',
+          rateLimits: evt.rate_limits,
         }]
       }
       return []
     }
 
     case 'item.started': {
-      const item = raw.item
+      const item = evt.item
       if (!item) return []
       return normalizeCodexItemStarted(item)
     }
 
     case 'item.updated': {
-      const item = raw.item
+      const item = evt.item
       if (!item) return []
       return normalizeCodexItemUpdated(item)
     }
 
     case 'item.completed': {
-      const item = raw.item
+      const item = evt.item
       if (!item) return []
       return normalizeCodexItemCompleted(item)
     }

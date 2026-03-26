@@ -239,6 +239,8 @@ export class PermissionServer extends EventEmitter {
 
   /** Scoped "allow always" keys. Format varies by tool type. */
   private scopedAllows = new Set<string>()
+  private scopedAllowKeysByRun = new Map<string, Set<string>>()
+  private scopedAllowRefCounts = new Map<string, number>()
 
   /** Tracked generated settings files: runToken → filePath */
   private settingsFiles = new Map<string, string>()
@@ -278,6 +280,10 @@ export class PermissionServer extends EventEmitter {
   }
 
   stop(): void {
+    for (const runToken of [...this.runTokens.keys()]) {
+      this.unregisterRun(runToken)
+    }
+
     // Deny all pending requests
     for (const [qid, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout)
@@ -290,6 +296,10 @@ export class PermissionServer extends EventEmitter {
       try { unlinkSync(filePath) } catch {}
     }
     this.settingsFiles.clear()
+    this.runTokens.clear()
+    this.scopedAllowKeysByRun.clear()
+    this.scopedAllowRefCounts.clear()
+    this.scopedAllows.clear()
 
     if (this.server) {
       this.server.close()
@@ -311,8 +321,19 @@ export class PermissionServer extends EventEmitter {
   registerRun(tabId: string, requestId: string, sessionId: string | null): string {
     const runToken = randomUUID()
     this.runTokens.set(runToken, { tabId, requestId, sessionId })
+    this.scopedAllowKeysByRun.set(runToken, new Set())
     log(`Registered run: token=${runToken.substring(0, 8)}… tab=${tabId.substring(0, 8)}…`)
     return runToken
+  }
+
+  private trackScopedAllow(runToken: string, key: string): void {
+    const runKeys = this.scopedAllowKeysByRun.get(runToken) || new Set<string>()
+    if (runKeys.has(key)) return
+    runKeys.add(key)
+    this.scopedAllowKeysByRun.set(runToken, runKeys)
+
+    this.scopedAllows.add(key)
+    this.scopedAllowRefCounts.set(key, (this.scopedAllowRefCounts.get(key) || 0) + 1)
   }
 
   /**
@@ -336,6 +357,20 @@ export class PermissionServer extends EventEmitter {
     if (filePath) {
       try { unlinkSync(filePath) } catch {}
       this.settingsFiles.delete(runToken)
+    }
+
+    const trackedKeys = this.scopedAllowKeysByRun.get(runToken)
+    if (trackedKeys) {
+      for (const key of trackedKeys) {
+        const nextCount = (this.scopedAllowRefCounts.get(key) || 0) - 1
+        if (nextCount <= 0) {
+          this.scopedAllowRefCounts.delete(key)
+          this.scopedAllows.delete(key)
+        } else {
+          this.scopedAllowRefCounts.set(key, nextCount)
+        }
+      }
+      this.scopedAllowKeysByRun.delete(runToken)
     }
 
     this.runTokens.delete(runToken)
@@ -371,13 +406,13 @@ export class PermissionServer extends EventEmitter {
     // Handle scoped "allow always" decisions
     if (decision === 'allow-session') {
       const key = `session:${sessionId}:tool:${toolName}`
-      this.scopedAllows.add(key)
+      this.trackScopedAllow(pending.runToken, key)
       log(`Session-allowed ${toolName} for session ${sessionId.substring(0, 8)}…`)
     } else if (decision === 'allow-domain') {
       const domain = extractDomain(pending.toolRequest.tool_input?.url)
       if (domain) {
         const key = `session:${sessionId}:webfetch:${domain}`
-        this.scopedAllows.add(key)
+        this.trackScopedAllow(pending.runToken, key)
         log(`Domain-allowed ${domain} for session ${sessionId.substring(0, 8)}…`)
       }
     }
