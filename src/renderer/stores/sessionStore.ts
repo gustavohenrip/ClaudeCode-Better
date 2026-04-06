@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
+import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, Provider, OpenRouterConfig, AskUserQuestionPayload } from '../../shared/types'
 import { useThemeStore, type EffortLevel } from '../theme'
 
 const notificationSrc = new URL('../../../resources/notification.mp3', import.meta.url).href
@@ -32,6 +32,17 @@ export function getEffectiveModelId(preferredModel: string | null): string {
 }
 
 const SESSION_SETTINGS_KEY = 'clui-session-settings'
+const OPENROUTER_SETTINGS_KEY = 'clui-openrouter-settings'
+
+const DEFAULT_OPENROUTER_CONFIG: OpenRouterConfig = {
+  enabled: false,
+  apiKey: '',
+  baseUrl: 'https://openrouter.ai/api/v1',
+  model: '',
+  httpReferer: '',
+  appTitle: '',
+  openClaudePath: '',
+}
 
 function loadSessionSettings(): { preferredModel: string | null; preferredCodexModel: string | null; permissionMode: 'ask' | 'auto' } {
   try {
@@ -54,6 +65,31 @@ function saveSessionSettings(s: { preferredModel: string | null; preferredCodexM
 
 const savedSession = loadSessionSettings()
 
+function loadOpenRouterConfig(): OpenRouterConfig {
+  try {
+    const raw = localStorage.getItem(OPENROUTER_SETTINGS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      return {
+        enabled: parsed.enabled === true,
+        apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
+        baseUrl: typeof parsed.baseUrl === 'string' && parsed.baseUrl.trim() ? parsed.baseUrl : DEFAULT_OPENROUTER_CONFIG.baseUrl,
+        model: typeof parsed.model === 'string' ? parsed.model : '',
+        httpReferer: typeof parsed.httpReferer === 'string' ? parsed.httpReferer : '',
+        appTitle: typeof parsed.appTitle === 'string' ? parsed.appTitle : '',
+        openClaudePath: typeof parsed.openClaudePath === 'string' ? parsed.openClaudePath : '',
+      }
+    }
+  } catch {}
+  return { ...DEFAULT_OPENROUTER_CONFIG }
+}
+
+function saveOpenRouterConfig(config: OpenRouterConfig): void {
+  try { localStorage.setItem(OPENROUTER_SETTINGS_KEY, JSON.stringify(config)) } catch {}
+}
+
+const savedOpenRouter = loadOpenRouterConfig()
+
 // ─── Store ───
 
 interface StaticInfo {
@@ -73,6 +109,7 @@ interface State {
   staticInfo: StaticInfo | null
   preferredModel: string | null
   preferredCodexModel: string | null
+  openRouter: OpenRouterConfig
   permissionMode: 'ask' | 'auto'
 
   // Marketplace state
@@ -87,9 +124,10 @@ interface State {
 
   // Actions
   initStaticInfo: () => Promise<void>
-  setPreferredModel: (model: string | null, provider?: 'claude' | 'codex') => void
+  setPreferredModel: (model: string | null, provider?: Provider) => void
+  setOpenRouterConfig: (config: OpenRouterConfig) => void
   setPermissionMode: (mode: 'ask' | 'auto') => void
-  createTab: (provider?: 'claude' | 'codex') => Promise<string>
+  createTab: (provider?: Provider) => Promise<string>
   switchProvider: () => void
   selectTab: (tabId: string) => void
   closeTab: (tabId: string) => void
@@ -103,10 +141,11 @@ interface State {
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
-  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: 'claude' | 'codex') => Promise<string>
+  resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: Provider) => Promise<string>
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
+  respondUserQuestion: (tabId: string, questionId: string, selectedIds: string[], otherText?: string) => void
   addDirectory: (dir: string) => void
   removeDirectory: (dir: string) => void
   setBaseDirectory: (dir: string) => void
@@ -116,6 +155,7 @@ interface State {
   handleNormalizedEvent: (tabId: string, event: NormalizedEvent) => void
   handleStatusChange: (tabId: string, newStatus: string, oldStatus: string) => void
   handleError: (tabId: string, error: EnrichedError) => void
+  handleRetryStatus: (tabId: string, status: { active: boolean; attempt: number; maxAttempts: number; reason: string; delayMs: number } | null) => void
 }
 
 let msgCounter = 0
@@ -195,7 +235,7 @@ function sendTaskNotification(tabId: string, tab: { title: string; workingDirect
   try { window.clui.notifyNative({ title, body }) } catch {}
 }
 
-function makeLocalTab(provider: 'claude' | 'codex' = 'claude'): TabState {
+function makeLocalTab(provider: Provider = 'claude'): TabState {
   return {
     id: crypto.randomUUID(),
     provider,
@@ -206,6 +246,7 @@ function makeLocalTab(provider: 'claude' | 'codex' = 'claude'): TabState {
     currentActivity: '',
     permissionQueue: [],
     permissionDenied: null,
+    askUserQuestions: [],
     attachments: [],
     messages: [],
     title: 'New Tab',
@@ -220,6 +261,7 @@ function makeLocalTab(provider: 'claude' | 'codex' = 'claude'): TabState {
     hasChosenDirectory: false,
     additionalDirs: [],
     tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    retryStatus: null,
   }
 }
 
@@ -232,6 +274,7 @@ export const useSessionStore = create<State>((set, get) => ({
   staticInfo: null,
   preferredModel: savedSession.preferredModel,
   preferredCodexModel: savedSession.preferredCodexModel,
+  openRouter: savedOpenRouter,
   permissionMode: savedSession.permissionMode,
 
   // Marketplace
@@ -263,9 +306,14 @@ export const useSessionStore = create<State>((set, get) => ({
     const s = get()
     const activeTab = s.tabs.find((t) => t.id === s.activeTabId)
     const isCodex = provider === 'codex' || activeTab?.provider === 'codex'
+    const isOpenClaude = provider === 'openclaude' || activeTab?.provider === 'openclaude'
     if (isCodex) {
       set({ preferredCodexModel: model })
       saveSessionSettings({ preferredModel: s.preferredModel, preferredCodexModel: model, permissionMode: s.permissionMode })
+    } else if (isOpenClaude) {
+      const next = { ...s.openRouter, model: model || s.openRouter.model }
+      set({ openRouter: next })
+      saveOpenRouterConfig(next)
     } else {
       set({ preferredModel: model })
       saveSessionSettings({ preferredModel: model, preferredCodexModel: s.preferredCodexModel, permissionMode: s.permissionMode })
@@ -276,6 +324,11 @@ export const useSessionStore = create<State>((set, get) => ({
     }
   },
 
+  setOpenRouterConfig: (config) => {
+    set({ openRouter: config })
+    saveOpenRouterConfig(config)
+  },
+
   setPermissionMode: (mode) => {
     set({ permissionMode: mode })
     window.clui.setPermissionMode(mode)
@@ -283,7 +336,7 @@ export const useSessionStore = create<State>((set, get) => ({
     saveSessionSettings({ preferredModel: s.preferredModel, preferredCodexModel: s.preferredCodexModel, permissionMode: mode })
   },
 
-  createTab: async (provider?: 'claude' | 'codex') => {
+  createTab: async (provider?: Provider) => {
     const prov = provider || useThemeStore.getState().defaultProvider
     const homeDir = get().staticInfo?.homePath || '~'
     const { tabId } = await window.clui.createTab(prov)
@@ -309,7 +362,9 @@ export const useSessionStore = create<State>((set, get) => ({
     const tab = s.tabs.find((t) => t.id === s.activeTabId)
     if (!tab) return
     if (tab.status === 'running' || tab.status === 'connecting') return
-    const newProvider = tab.provider === 'claude' ? 'codex' as const : 'claude' as const
+    const order: Provider[] = ['claude', 'openclaude', 'codex']
+    const idx = order.indexOf(tab.provider)
+    const newProvider = order[(idx + 1) % order.length]
     get().createTab(newProvider)
   },
 
@@ -484,7 +539,7 @@ export const useSessionStore = create<State>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
-          ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, queuedPrompts: [] }
+          ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, askUserQuestions: [], queuedPrompts: [] }
           : t
       ),
     }))
@@ -498,7 +553,7 @@ export const useSessionStore = create<State>((set, get) => ({
         ? await window.clui.resolveProjectDir(projectDir).catch(() => null) || null
         : await window.clui.resolveSessionDir(sessionId).catch(() => null) || null
     const defaultDir = projectPath || resolvedDir || get().staticInfo?.homePath || '~'
-    const { tabId } = await window.clui.createTab(prov === 'codex' ? 'codex' : undefined)
+    const { tabId } = await window.clui.createTab(prov)
 
     const history = await window.clui.loadSession(sessionId, projectPath, projectDir).catch(() => [])
     const messages: Message[] = history.map((m) => ({
@@ -561,6 +616,29 @@ export const useSessionStore = create<State>((set, get) => ({
               permissionQueue: remaining,
               currentActivity: remaining.length > 0
                 ? `Waiting for permission: ${remaining[0].toolTitle}`
+                : 'Working...',
+            }
+          }),
+        }))
+      })
+      .catch(() => {})
+  },
+
+  // ─── Ask User Question response ───
+
+  respondUserQuestion: (tabId, questionId, selectedIds, otherText) => {
+    const payload = { tabId, questionId, selectedIds, otherText }
+    window.clui.respondUserQuestion(payload)
+      .then(() => {
+        set((s) => ({
+          tabs: s.tabs.map((t) => {
+            if (t.id !== tabId) return t
+            const remaining = t.askUserQuestions.filter((q) => q.questionId !== questionId)
+            return {
+              ...t,
+              askUserQuestions: remaining,
+              currentActivity: remaining.length > 0
+                ? `Waiting for response...`
                 : 'Working...',
             }
           }),
@@ -716,10 +794,15 @@ export const useSessionStore = create<State>((set, get) => ({
       }))
     }
 
-    const { preferredModel, preferredCodexModel } = get()
+    const { preferredModel, preferredCodexModel, openRouter } = get()
     const { effort, thinkingEnabled, globalRules } = useThemeStore.getState()
     const isCodexTab = tab.provider === 'codex'
-    const activeModel = isCodexTab ? preferredCodexModel : preferredModel
+    const isOpenClaudeTab = tab.provider === 'openclaude'
+    const activeModel = isCodexTab
+      ? preferredCodexModel
+      : isOpenClaudeTab
+        ? (openRouter.model || preferredModel)
+        : preferredModel
     const effectiveEffort: EffortLevel = (effort === 'max' && !isCodexTab && !MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel)))
       ? 'high'
       : effort
@@ -733,6 +816,7 @@ export const useSessionStore = create<State>((set, get) => ({
       effort: effectiveEffort !== 'medium' ? effectiveEffort : undefined,
       thinking: isCodexTab ? undefined : (thinkingEnabled ? 'adaptive' : 'disabled') as 'adaptive' | 'disabled',
       systemPrompt: isCodexTab ? undefined : (globalRules.trim() || undefined),
+      openRouter: isOpenClaudeTab ? openRouter : undefined,
     }
 
     window.clui.prompt(activeTabId, requestId, runOptions).catch((err: Error) => {
@@ -842,7 +926,52 @@ export const useSessionStore = create<State>((set, get) => ({
             const msgs2 = [...updated.messages]
             const runningTool = [...msgs2].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
             if (runningTool) {
-              runningTool.toolStatus = 'completed'
+              if (runningTool.toolName === 'AskUserQuestion' && runningTool.toolInput) {
+                try {
+                  let inputStr = runningTool.toolInput
+                  const lastBrace = inputStr.lastIndexOf('}')
+                  if (lastBrace !== -1) {
+                    inputStr = inputStr.substring(0, lastBrace + 1)
+                  }
+                  const parsed = JSON.parse(inputStr)
+                  const questions = Array.isArray(parsed.questions) ? parsed.questions : []
+
+                  let hasQuestions = false
+                  for (const q of questions) {
+                    const qId = runningTool.id ? `${runningTool.id}-${q.header || 'unknown'}` : `q-${Date.now()}`
+                    if (q.question) {
+                      hasQuestions = true
+                      const opts = Array.isArray(q.options)
+                        ? q.options.map((o: { label: string; description?: string }, i: number) => ({
+                            id: `opt-${i}`,
+                            label: o.label || `Option ${i + 1}`,
+                            description: o.description,
+                          }))
+                        : []
+                      updated.askUserQuestions = [
+                        ...updated.askUserQuestions,
+                        {
+                          questionId: qId,
+                          question: q.question,
+                          header: q.header || undefined,
+                          options: opts,
+                          multiSelect: !!q.multiSelect,
+                          allowOtherText: true,
+                        },
+                      ]
+                    }
+                  }
+                  if (hasQuestions) {
+                    updated.currentActivity = 'Waiting for response...'
+                  } else {
+                    runningTool.toolStatus = 'completed'
+                  }
+                } catch {
+                  runningTool.toolStatus = 'completed'
+                }
+              } else {
+                runningTool.toolStatus = 'completed'
+              }
             }
             updated.messages = msgs2
             break
@@ -1002,6 +1131,24 @@ export const useSessionStore = create<State>((set, get) => ({
             break
           }
 
+          case 'ask_user_question': {
+            const q: AskUserQuestionPayload = {
+              questionId: event.questionId,
+              question: event.question,
+              header: event.header,
+              options: event.options.map((o) => ({
+                id: o.id,
+                label: o.label,
+                description: o.description,
+              })),
+              multiSelect: event.multiSelect,
+              allowOtherText: event.allowOtherText ?? false,
+            }
+            updated.askUserQuestions = [...updated.askUserQuestions, q]
+            updated.currentActivity = `Waiting for response...`
+            break
+          }
+
           case 'rate_limit':
             if (event.status !== 'allowed') {
               updated.messages = [
@@ -1077,6 +1224,18 @@ export const useSessionStore = create<State>((set, get) => ({
                 },
               ],
         }
+      }),
+    }))
+  },
+
+  handleRetryStatus: (tabId, status) => {
+    set((s) => ({
+      tabs: s.tabs.map((t) => {
+        if (t.id !== tabId) return t
+        if (status) {
+          return { ...t, retryStatus: status, currentActivity: status.active ? `Reconnecting... (attempt ${status.attempt + 1}/${status.maxAttempts})` : t.currentActivity }
+        }
+        return { ...t, retryStatus: null }
       }),
     }))
   },

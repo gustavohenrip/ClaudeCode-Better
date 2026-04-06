@@ -106,6 +106,8 @@ export function SettingsPopover() {
   const deleteProfile = useThemeStore((s) => s.deleteProfile)
   const isExpanded = useSessionStore((s) => s.isExpanded)
   const preferredModel = useSessionStore((s) => s.preferredModel)
+  const openRouter = useSessionStore((s) => s.openRouter)
+  const setOpenRouterConfig = useSessionStore((s) => s.setOpenRouterConfig)
   const supportsMaxEffort = MODELS_SUPPORTING_MAX_EFFORT.has(getEffectiveModelId(preferredModel))
   const isCodex = useSessionStore((s) => {
     const tab = s.tabs.find((t) => t.id === s.activeTabId)
@@ -119,9 +121,10 @@ export function SettingsPopover() {
     return tab
   })
   const mcpServers = activeTab_?.sessionMcpServers || []
+  const showOpenRouterTab = defaultProvider === 'openclaude' || activeTab_?.provider === 'openclaude'
 
   const [open, setOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState<'settings' | 'rules' | 'mcp'>('settings')
+  const [activeTab, setActiveTab] = useState<'settings' | 'openrouter' | 'rules' | 'mcp'>('settings')
   const [showNewInput, setShowNewInput] = useState(false)
   const [newName, setNewName] = useState('')
   const [newNameErr, setNewNameErr] = useState('')
@@ -138,6 +141,14 @@ export function SettingsPopover() {
   const [mcpAdding, setMcpAdding] = useState(false)
   const [mcpError, setMcpError] = useState('')
   const [mcpRemoving, setMcpRemoving] = useState<string | null>(null)
+  const [orEnabled, setOrEnabled] = useState(openRouter.enabled)
+  const [orApiKey, setOrApiKey] = useState(openRouter.apiKey)
+  const [orBaseUrl, setOrBaseUrl] = useState(openRouter.baseUrl)
+  const [orModel, setOrModel] = useState(openRouter.model)
+  const [orHttpReferer, setOrHttpReferer] = useState(openRouter.httpReferer || '')
+  const [orAppTitle, setOrAppTitle] = useState(openRouter.appTitle || '')
+  const [orOpenClaudePath, setOrOpenClaudePath] = useState(openRouter.openClaudePath || '')
+  const [orSaved, setOrSaved] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ right: number; top?: number; bottom?: number; maxHeight?: number }>({ right: 0 })
@@ -209,6 +220,22 @@ export function SettingsPopover() {
     setRenameErr('')
   }, [activeProfileId])
 
+  useEffect(() => {
+    setOrEnabled(openRouter.enabled)
+    setOrApiKey(openRouter.apiKey)
+    setOrBaseUrl(openRouter.baseUrl)
+    setOrModel(openRouter.model)
+    setOrHttpReferer(openRouter.httpReferer || '')
+    setOrAppTitle(openRouter.appTitle || '')
+    setOrOpenClaudePath(openRouter.openClaudePath || '')
+  }, [openRouter])
+
+  useEffect(() => {
+    if (!showOpenRouterTab && activeTab === 'openrouter') {
+      setActiveTab('settings')
+    }
+  }, [showOpenRouterTab, activeTab])
+
   const handleCreateProfile = () => {
     if (!newName.trim()) { setNewNameErr('Name cannot be empty'); return }
     const profile = createProfile(newName)
@@ -265,7 +292,7 @@ export function SettingsPopover() {
             ...(pos.top != null ? { top: pos.top } : {}),
             ...(pos.bottom != null ? { bottom: pos.bottom } : {}),
             right: pos.right,
-            width: 260,
+            width: 320,
             maxHeight: 420,
             pointerEvents: 'auto',
             background: colors.popoverBg,
@@ -282,7 +309,7 @@ export function SettingsPopover() {
               className="flex flex-shrink-0"
               style={{ borderBottom: `1px solid ${colors.popoverBorder}` }}
             >
-              {(['settings', 'rules', 'mcp'] as const).map((tab) => (
+              {(['settings', ...(showOpenRouterTab ? ['openrouter'] as const : []), 'rules', 'mcp'] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -298,6 +325,7 @@ export function SettingsPopover() {
                   }}
                 >
                   {tab === 'settings' && <><Lightning size={10} />Settings</>}
+                  {tab === 'openrouter' && <><GlobeSimple size={10} />OpenRouter</>}
                   {tab === 'rules' && <><Scroll size={10} />Rules</>}
                   {tab === 'mcp' && <><Plugs size={10} />MCP</>}
                 </button>
@@ -305,117 +333,212 @@ export function SettingsPopover() {
             </div>
 
             {activeTab === 'settings' && (
-              <div className="p-3 flex flex-col gap-2.5">
-                <div>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <ArrowsOutSimple size={14} style={{ color: colors.textTertiary }} />
-                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                        Full width
+              <div style={{ overflow: 'auto', flex: 1, minHeight: 0 }}>
+                <div className="p-3 flex flex-col gap-2.5">
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <ArrowsOutSimple size={14} style={{ color: colors.textTertiary }} />
+                        <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                          Full width
+                        </div>
                       </div>
+                      <RowToggle checked={expandedUI} onChange={(next) => setExpandedUI(next)} colors={colors} label="Toggle full width panel" />
                     </div>
-                    <RowToggle checked={expandedUI} onChange={(next) => setExpandedUI(next)} colors={colors} label="Toggle full width panel" />
                   </div>
-                </div>
 
-                <div style={{ height: 1, background: colors.popoverBorder }} />
+                  <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Bell size={14} style={{ color: colors.textTertiary }} />
-                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                        Notification sound
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Bell size={14} style={{ color: colors.textTertiary }} />
+                        <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                          Notification sound
+                        </div>
                       </div>
+                      <RowToggle checked={soundEnabled} onChange={setSoundEnabled} colors={colors} label="Toggle notification sound" />
                     </div>
-                    <RowToggle checked={soundEnabled} onChange={setSoundEnabled} colors={colors} label="Toggle notification sound" />
                   </div>
-                </div>
 
-                <div style={{ height: 1, background: colors.popoverBorder }} />
+                  <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Moon size={14} style={{ color: colors.textTertiary }} />
-                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                        Dark theme
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Moon size={14} style={{ color: colors.textTertiary }} />
+                        <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                          Dark theme
+                        </div>
                       </div>
+                      <RowToggle checked={themeMode === 'dark'} onChange={(next) => setThemeMode(next ? 'dark' : 'light')} colors={colors} label="Toggle dark theme" />
                     </div>
-                    <RowToggle checked={themeMode === 'dark'} onChange={(next) => setThemeMode(next ? 'dark' : 'light')} colors={colors} label="Toggle dark theme" />
                   </div>
-                </div>
 
-                <div style={{ height: 1, background: colors.popoverBorder }} />
+                  <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Robot size={14} style={{ color: colors.textTertiary }} />
+                  <div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Robot size={14} style={{ color: colors.textTertiary }} />
+                        <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                          Default AI
+                        </div>
+                      </div>
+                      <SegmentedControl
+                        value={defaultProvider}
+                        onChange={(v) => setDefaultProvider(v as 'claude' | 'openclaude' | 'codex')}
+                        options={[
+                          { value: 'claude', label: 'Claude' },
+                          { value: 'openclaude', label: 'OpenClaude' },
+                          { value: 'codex', label: 'Codex' },
+                        ]}
+                        colors={colors}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ height: 1, background: colors.popoverBorder }} />
+
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <Lightning size={14} style={{ color: colors.textTertiary }} />
                       <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                        Default AI
+                        {isCodex ? 'Reasoning' : 'Effort'}
                       </div>
                     </div>
                     <SegmentedControl
-                      value={defaultProvider}
-                      onChange={(v) => setDefaultProvider(v as 'claude' | 'codex')}
-                      options={[
-                        { value: 'claude', label: 'Claude' },
-                        { value: 'codex', label: 'Codex' },
-                      ]}
+                      value={isCodex
+                        ? (effort === 'max' ? 'max' : effort)
+                        : (effort === 'max' && !supportsMaxEffort ? 'high' : effort)
+                      }
+                      onChange={(v) => setEffort(v as EffortLevel)}
+                      options={isCodex
+                        ? [
+                            { value: 'low', label: 'Low' },
+                            { value: 'medium', label: 'Medium' },
+                            { value: 'high', label: 'High' },
+                            { value: 'max', label: 'Extra' },
+                          ]
+                        : [
+                            { value: 'low', label: 'Low' },
+                            { value: 'medium', label: 'Medium' },
+                            { value: 'high', label: 'High' },
+                            ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
+                          ]
+                      }
                       colors={colors}
                     />
                   </div>
-                </div>
 
-                <div style={{ height: 1, background: colors.popoverBorder }} />
+                  {!isCodex && (
+                    <>
+                      <div style={{ height: 1, background: colors.popoverBorder }} />
 
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <Lightning size={14} style={{ color: colors.textTertiary }} />
-                    <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
-                      {isCodex ? 'Reasoning' : 'Effort'}
-                    </div>
-                  </div>
-                  <SegmentedControl
-                    value={isCodex
-                      ? (effort === 'max' ? 'max' : effort)
-                      : (effort === 'max' && !supportsMaxEffort ? 'high' : effort)
-                    }
-                    onChange={(v) => setEffort(v as EffortLevel)}
-                    options={isCodex
-                      ? [
-                          { value: 'low', label: 'Low' },
-                          { value: 'medium', label: 'Medium' },
-                          { value: 'high', label: 'High' },
-                          { value: 'max', label: 'Extra' },
-                        ]
-                      : [
-                          { value: 'low', label: 'Low' },
-                          { value: 'medium', label: 'Medium' },
-                          { value: 'high', label: 'High' },
-                          ...(supportsMaxEffort ? [{ value: 'max', label: 'Max' }] : []),
-                        ]
-                    }
-                    colors={colors}
-                  />
-                </div>
-
-                {!isCodex && (
-                  <>
-                    <div style={{ height: 1, background: colors.popoverBorder }} />
-
-                    <div>
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Brain size={14} style={{ color: colors.textTertiary }} />
-                          <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Thinking</div>
+                      <div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Brain size={14} style={{ color: colors.textTertiary }} />
+                            <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>Thinking</div>
+                          </div>
+                          <RowToggle checked={thinkingEnabled} onChange={setThinkingEnabled} colors={colors} label="Toggle extended thinking" />
                         </div>
-                        <RowToggle checked={thinkingEnabled} onChange={setThinkingEnabled} colors={colors} label="Toggle extended thinking" />
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'openrouter' && showOpenRouterTab && (
+              <div style={{ overflow: 'auto', flex: 1, minHeight: 0 }}>
+                <div className="p-3 flex flex-col gap-2.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <GlobeSimple size={14} style={{ color: colors.textTertiary }} />
+                      <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                        OpenRouter
                       </div>
                     </div>
-                  </>
-                )}
+                    <RowToggle checked={orEnabled} onChange={setOrEnabled} colors={colors} label="Toggle OpenRouter integration" />
+                  </div>
+
+                  <input
+                    value={orApiKey}
+                    onChange={(e) => setOrApiKey(e.target.value)}
+                    placeholder="API key"
+                    type="password"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <input
+                    value={orBaseUrl}
+                    onChange={(e) => setOrBaseUrl(e.target.value)}
+                    placeholder="https://openrouter.ai/api/v1"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <input
+                    value={orModel}
+                    onChange={(e) => setOrModel(e.target.value)}
+                    placeholder="Model (ex: openai/gpt-4.1-mini)"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <input
+                    value={orHttpReferer}
+                    onChange={(e) => setOrHttpReferer(e.target.value)}
+                    placeholder="HTTP Referer (optional)"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <input
+                    value={orAppTitle}
+                    onChange={(e) => setOrAppTitle(e.target.value)}
+                    placeholder="App title (optional)"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <input
+                    value={orOpenClaudePath}
+                    onChange={(e) => setOrOpenClaudePath(e.target.value)}
+                    placeholder="OpenClaude binary path (optional)"
+                    spellCheck={false}
+                    className="w-full rounded-md"
+                    style={{ background: colors.surfaceSecondary, border: `1px solid ${colors.containerBorder}`, color: colors.textPrimary, padding: '6px 9px', outline: 'none', fontFamily: 'inherit', fontSize: 11 }}
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpenRouterConfig({
+                        enabled: orEnabled,
+                        apiKey: orApiKey.trim(),
+                        baseUrl: orBaseUrl.trim() || 'https://openrouter.ai/api/v1',
+                        model: orModel.trim(),
+                        httpReferer: orHttpReferer.trim(),
+                        appTitle: orAppTitle.trim(),
+                        openClaudePath: orOpenClaudePath.trim(),
+                      })
+                      setOrSaved(true)
+                      setTimeout(() => setOrSaved(false), 1200)
+                    }}
+                    className="flex items-center justify-center gap-1 py-[6px] rounded-lg text-[10px] font-medium transition-colors"
+                    style={{ background: colors.accent, color: colors.textOnAccent, border: 'none', cursor: 'pointer' }}
+                  >
+                    {orSaved ? 'Saved' : 'Save OpenRouter'}
+                  </button>
+                </div>
               </div>
             )}
 

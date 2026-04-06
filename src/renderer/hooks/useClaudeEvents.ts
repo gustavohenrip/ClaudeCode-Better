@@ -13,6 +13,7 @@ export function useClaudeEvents() {
   const handleNormalizedEvent = useSessionStore((s) => s.handleNormalizedEvent)
   const handleStatusChange = useSessionStore((s) => s.handleStatusChange)
   const handleError = useSessionStore((s) => s.handleError)
+  const handleRetryStatus = useSessionStore((s) => s.handleRetryStatus)
 
   const chunkBufferRef = useRef<Map<string, string>>(new Map())
   const thinkingBufferRef = useRef<Map<string, string>>(new Map())
@@ -86,16 +87,21 @@ export function useClaudeEvents() {
       }
     })
 
+    const unsubRetry = window.clui.onRetryStatus((tabId, status) => {
+      handleRetryStatus(tabId, status.active ? status : null)
+    })
+
     return () => {
       unsubEvent()
       unsubStatus()
       unsubError()
       unsubSkill()
+      unsubRetry()
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
       chunkBufferRef.current.clear()
       thinkingBufferRef.current.clear()
     }
-  }, [handleNormalizedEvent, handleStatusChange, handleError])
+  }, [handleNormalizedEvent, handleStatusChange, handleError, handleRetryStatus])
 
   // Note: window.clui.start() is called via sessionStore.initStaticInfo() in App.tsx.
   // No duplicate call needed here.

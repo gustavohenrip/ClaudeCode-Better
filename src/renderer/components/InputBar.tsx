@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -43,6 +43,8 @@ export function InputBar() {
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
   const staticInfo = useSessionStore((s) => s.staticInfo)
   const preferredModel = useSessionStore((s) => s.preferredModel)
+  const preferredCodexModel = useSessionStore((s) => s.preferredCodexModel)
+  const openRouter = useSessionStore((s) => s.openRouter)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const tab = useActiveTab()
   const effort = useThemeStore((s) => s.effort)
@@ -187,11 +189,20 @@ export function InputBar() {
         break
       }
       case '/model': {
+        if (tab?.provider === 'openclaude') {
+          const current = openRouter.model?.trim() || 'not configured'
+          addSystemMessage(`OpenRouter model: ${current}\n\nConfigure in Settings → OpenRouter.`)
+          break
+        }
+        const models = tab?.provider === 'codex' ? CODEX_MODELS : AVAILABLE_MODELS
         const model = tab?.sessionModel || null
         const version = tab?.sessionVersion || staticInfo?.version || null
-        const current = preferredModel || model || 'default'
-        const lines = AVAILABLE_MODELS.map((m) => {
-          const active = m.id === current || (!preferredModel && m.id === model)
+        const current = tab?.provider === 'codex'
+          ? (preferredCodexModel || model || CODEX_MODELS[2].id)
+          : (preferredModel || model || 'default')
+        const hasPreferred = tab?.provider === 'codex' ? !!preferredCodexModel : !!preferredModel
+        const lines = models.map((m) => {
+          const active = m.id === current || (!hasPreferred && m.id === model)
           return `  ${active ? '\u25CF' : '\u25CB'} ${m.label} (${m.id})`
         })
         const header = version ? `Claude Code ${version}` : 'Claude Code'
@@ -239,7 +250,7 @@ export function InputBar() {
         break
       }
     }
-  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel, effort, thinkingEnabled, setThinkingEnabled])
+  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel, preferredCodexModel, openRouter.model, effort, thinkingEnabled, setThinkingEnabled])
 
   const sendCliCommand = useCallback((command: string) => {
     if (!tab?.claudeSessionId) {
@@ -280,19 +291,28 @@ export function InputBar() {
     const prompt = input.trim()
     const modelMatch = prompt.match(/^\/model\s+(\S+)/i)
     if (modelMatch) {
+      const isCodexTab = tab?.provider === 'codex'
+      const isOpenClaudeTab = tab?.provider === 'openclaude'
+      if (isOpenClaudeTab) {
+        setInput('')
+        setSlashFilter(null)
+        sendMessage(prompt)
+        return
+      }
       const query = modelMatch[1].toLowerCase()
-      const match = AVAILABLE_MODELS.find((m: { id: string; label: string }) =>
+      const models = isCodexTab ? CODEX_MODELS : AVAILABLE_MODELS
+      const match = models.find((m: { id: string; label: string }) =>
         m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
       )
       if (match) {
-        setPreferredModel(match.id)
+        setPreferredModel(match.id, isCodexTab ? 'codex' : 'claude')
         setInput('')
         setSlashFilter(null)
         addSystemMessage(`Model switched to ${match.label} (${match.id})`)
       } else {
         setInput('')
         setSlashFilter(null)
-        addSystemMessage(`Unknown model "${modelMatch[1]}". Available: opus, sonnet, haiku`)
+        addSystemMessage(`Unknown model "${modelMatch[1]}".`)
       }
       return
     }

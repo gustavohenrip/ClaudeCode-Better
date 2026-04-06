@@ -7,6 +7,8 @@ import { StreamParser } from '../stream-parser'
 import { normalize, normalizeCodex } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
+import { getScreenToolsMcpConfig } from '../mcp/screen-tools-config'
+import { getComputerUseMcpConfig } from '../mcp/computer-use-config'
 import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
 
 const MAX_RING_LINES = 100
@@ -49,12 +51,20 @@ const SAFE_TOOLS = [
   'Notebook',
   'WebSearch', 'WebFetch',
   'ExitPlanMode', 'EnterPlanMode',
+  'capture_screenshot',
+  'get_mouse_position',
+  'browser_screenshot',
+  'browser_extract',
+  'browser_info',
 ]
 
 // All tools to pre-approve when NO hook server is available (fallback path).
 // Includes safe + dangerous tools so nothing is silently denied.
 const DEFAULT_ALLOWED_TOOLS = [
   'Bash', 'Edit', 'Write', 'MultiEdit',
+  'move_mouse', 'click_mouse', 'scroll_mouse', 'drag_mouse',
+  'type_text', 'press_key',
+  'browser_navigate', 'browser_execute_js', 'browser_click', 'browser_type', 'browser_close',
   ...SAFE_TOOLS,
 ]
 
@@ -92,13 +102,16 @@ export class RunManager extends EventEmitter {
   private activeRuns = new Map<string, RunHandle>()
   private _finishedRuns = new Map<string, RunHandle>()
   private claudeBinary: string
+  private openClaudeBinary: string
   private codexBinary: string
 
   constructor() {
     super()
     this.claudeBinary = this._findClaudeBinary()
+    this.openClaudeBinary = this._findOpenClaudeBinary()
     this.codexBinary = this._findCodexBinary()
     log(`Claude binary: ${this.claudeBinary}`)
+    log(`OpenClaude binary: ${this.openClaudeBinary}`)
     log(`Codex binary: ${this.codexBinary}`)
   }
 
@@ -152,15 +165,83 @@ export class RunManager extends EventEmitter {
     return 'codex'
   }
 
-  private _getEnv(provider?: string): NodeJS.ProcessEnv {
+  private _findOpenClaudeBinary(): string {
+    const candidates = [
+      join(process.cwd(), 'vendor', 'openclaude', 'bin', 'openclaude'),
+      join(__dirname, '..', '..', '..', 'vendor', 'openclaude', 'bin', 'openclaude'),
+      '/usr/local/bin/openclaude',
+      '/opt/homebrew/bin/openclaude',
+      join(homedir(), '.npm-global/bin/openclaude'),
+    ]
+
+    for (const c of candidates) {
+      try {
+        execSync(`test -x "${c}"`, { stdio: 'ignore' })
+        return c
+      } catch {}
+    }
+
+    try {
+      return execSync('/bin/zsh -ilc "whence -p openclaude"', { encoding: 'utf-8', env: getCliEnv() }).trim()
+    } catch {}
+
+    try {
+      return execSync('/bin/bash -lc "which openclaude"', { encoding: 'utf-8', env: getCliEnv() }).trim()
+    } catch {}
+
+    return 'openclaude'
+  }
+
+  private _getEnv(provider?: string, options?: RunOptions): NodeJS.ProcessEnv {
     const env = getCliEnv()
-    const binary = provider === 'codex' ? this.codexBinary : this.claudeBinary
+    const configuredOpenClaude = options?.openRouter?.openClaudePath?.trim()
+    const binary = provider === 'codex'
+      ? this.codexBinary
+      : provider === 'openclaude'
+        ? (configuredOpenClaude || this.openClaudeBinary)
+        : this.claudeBinary
     const binDir = binary.substring(0, binary.lastIndexOf('/'))
     if (env.PATH && !env.PATH.includes(binDir)) {
       env.PATH = `${binDir}:${env.PATH}`
     }
 
+    if (provider === 'openclaude') {
+      const openRouter = options?.openRouter
+      if (openRouter?.enabled) {
+        env.CLAUDE_CODE_USE_OPENAI = '1'
+        if (openRouter.apiKey) {
+          env.OPENAI_API_KEY = openRouter.apiKey
+          env.OPENROUTER_API_KEY = openRouter.apiKey
+        }
+        if (openRouter.baseUrl) {
+          env.OPENAI_BASE_URL = openRouter.baseUrl
+        }
+        if (openRouter.model) {
+          env.OPENAI_MODEL = openRouter.model
+        }
+        if (openRouter.httpReferer) {
+          env.OPENROUTER_HTTP_REFERER = openRouter.httpReferer
+        }
+        if (openRouter.appTitle) {
+          env.OPENROUTER_APP_TITLE = openRouter.appTitle
+        }
+      }
+    }
+
     return env
+  }
+
+  private _toTomlString(value: string): string {
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  }
+
+  private _toTomlArray(values: string[]): string {
+    return `[${values.map((v) => this._toTomlString(v)).join(', ')}]`
+  }
+
+  private _toTomlInlineTable(values: Record<string, string>): string {
+    const entries = Object.entries(values).map(([k, v]) => `${k} = ${this._toTomlString(v)}`)
+    return `{ ${entries.join(', ')} }`
   }
 
   private _resolveSessionCwd(sessionId: string): string | null {
@@ -231,7 +312,9 @@ export class RunManager extends EventEmitter {
 
   startRun(requestId: string, options: RunOptions, flags?: { keepAlive?: boolean; skipPrompt?: boolean }): RunHandle {
     const isCodex = options.provider === 'codex'
-    const binary = isCodex ? this.codexBinary : this.claudeBinary
+    const isOpenClaude = options.provider === 'openclaude'
+    const configuredOpenClaude = options.openRouter?.openClaudePath?.trim()
+    const binary = isCodex ? this.codexBinary : isOpenClaude ? (configuredOpenClaude || this.openClaudeBinary) : this.claudeBinary
 
     let cwd = options.projectPath === '~' ? homedir() : options.projectPath
     const hasExplicitPath = typeof options.projectPath === 'string' && options.projectPath.trim() !== '' && options.projectPath !== '~'
@@ -248,6 +331,14 @@ export class RunManager extends EventEmitter {
       } else {
         args = ['exec', '--json', '-']
       }
+      const screenToolsMcp = getScreenToolsMcpConfig()
+      args.push('-c', `mcp_servers.${screenToolsMcp.name}.command=${this._toTomlString(screenToolsMcp.command)}`)
+      args.push('-c', `mcp_servers.${screenToolsMcp.name}.args=${this._toTomlArray(screenToolsMcp.args)}`)
+      args.push('-c', `mcp_servers.${screenToolsMcp.name}.env=${this._toTomlInlineTable(screenToolsMcp.env)}`)
+      const computerUseMcp = getComputerUseMcpConfig()
+      args.push('-c', `mcp_servers.${computerUseMcp.name}.command=${this._toTomlString(computerUseMcp.command)}`)
+      args.push('-c', `mcp_servers.${computerUseMcp.name}.args=${this._toTomlArray(computerUseMcp.args)}`)
+      args.push('-c', `mcp_servers.${computerUseMcp.name}.env=${this._toTomlInlineTable(computerUseMcp.env)}`)
       if (options.model) {
         args.push('-m', options.model)
       }
@@ -276,6 +367,9 @@ export class RunManager extends EventEmitter {
         '--include-partial-messages',
         '--permission-mode', options.cliPermissionMode || 'default',
       ]
+      if (isOpenClaude && options.openRouter?.enabled) {
+        args.push('--provider', 'openai')
+      }
       if (options.sessionId) {
         args.push('--resume', options.sessionId)
       }
@@ -295,6 +389,12 @@ export class RunManager extends EventEmitter {
       }
       if (options.hookSettingsPath) {
         args.push('--settings', options.hookSettingsPath)
+      }
+      if (isOpenClaude) {
+        if (options.allowedTools && options.allowedTools.length > 0) {
+          args.push('--allowedTools', options.allowedTools.join(','))
+        }
+      } else if (options.hookSettingsPath) {
         const safeAllowed = [
           ...SAFE_TOOLS,
           ...(options.allowedTools || []),
@@ -323,13 +423,13 @@ export class RunManager extends EventEmitter {
       log(`Starting run ${requestId}: ${binary} ${args.join(' ')}`)
       log(`Prompt: ${options.prompt.substring(0, 200)}`)
     } else {
-      log(`Starting run ${requestId} [${isCodex ? 'codex' : 'claude'}]`)
+      log(`Starting run ${requestId} [${isCodex ? 'codex' : isOpenClaude ? 'openclaude' : 'claude'}]`)
     }
 
     const child = spawn(binary, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
-      env: this._getEnv(options.provider),
+      env: this._getEnv(options.provider, options),
     })
 
     log(`Spawned PID: ${child.pid}`)

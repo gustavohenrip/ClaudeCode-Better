@@ -56,7 +56,7 @@ function CodexQuotaWidget() {
   const sReset = formatResetTime(quota.secondaryResetsAt, nowMs)
 
   const barColor = (leftPct: number) => {
-    if (leftPct <= 5) return '#c47060'
+    if (leftPct <= 5) return '#ef4444'
     if (leftPct <= 20) return '#d97757'
     return colors.accent
   }

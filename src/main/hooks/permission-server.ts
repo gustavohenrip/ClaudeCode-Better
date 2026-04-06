@@ -25,6 +25,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { log as _log } from '../logger'
+import { getScreenToolsMcpConfig } from '../mcp/screen-tools-config'
+import { getComputerUseMcpConfig } from '../mcp/computer-use-config'
 const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
 const DEFAULT_PORT = 19836
 const MAX_BODY_SIZE = 1024 * 1024 // 1MB
@@ -459,7 +461,23 @@ export class PermissionServer extends EventEmitter {
    */
   generateSettingsFile(runToken: string): string {
     const port = this._actualPort || this.port
+    const screenToolsMcp = getScreenToolsMcpConfig()
+    const computerUseMcp = getComputerUseMcpConfig()
     const settings = {
+      mcpServers: {
+        [screenToolsMcp.name]: {
+          type: screenToolsMcp.type,
+          command: screenToolsMcp.command,
+          args: screenToolsMcp.args,
+          env: screenToolsMcp.env,
+        },
+        [computerUseMcp.name]: {
+          type: computerUseMcp.type,
+          command: computerUseMcp.command,
+          args: computerUseMcp.args,
+          env: computerUseMcp.env,
+        },
+      },
       hooks: {
         PreToolUse: [
           {

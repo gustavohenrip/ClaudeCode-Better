@@ -23,6 +23,7 @@ export interface CluiAPI {
   transcribeAudio(audioBase64: string): Promise<{ error: string | null; transcript: string | null }>
   getDiagnostics(): Promise<any>
   respondPermission(tabId: string, questionId: string, optionId: string): Promise<boolean>
+  respondUserQuestion(payload: { tabId: string; questionId: string; selectedIds: string[]; otherText?: string }): Promise<void>
   initSession(tabId: string, systemPrompt?: string): void
   resetTabSession(tabId: string): void
   listSessions(projectPath?: string, provider?: string): Promise<SessionMeta[]>
@@ -54,6 +55,7 @@ export interface CluiAPI {
   onTabStatusChange(callback: (tabId: string, newStatus: string, oldStatus: string) => void): () => void
   onError(callback: (tabId: string, error: EnrichedError) => void): () => void
   onSkillStatus(callback: (status: { name: string; state: string; error?: string; reason?: string }) => void): () => void
+  onRetryStatus(callback: (tabId: string, status: { active: boolean; attempt: number; maxAttempts: number; reason: string; delayMs: number }) => void): () => void
   onCodexQuotaUpdate(callback: (quota: CodexQuota) => void): () => void
   onWindowShown(callback: () => void): () => void
   onWindowWillHide(callback: () => void): () => void
@@ -82,6 +84,8 @@ const api: CluiAPI = {
   getDiagnostics: () => ipcRenderer.invoke(IPC.GET_DIAGNOSTICS),
   respondPermission: (tabId, questionId, optionId) =>
     ipcRenderer.invoke(IPC.RESPOND_PERMISSION, { tabId, questionId, optionId }),
+  respondUserQuestion: (payload) =>
+    ipcRenderer.invoke(IPC.RESPOND_USER_QUESTION, payload),
   initSession: (tabId, systemPrompt) => ipcRenderer.send(IPC.INIT_SESSION, tabId, systemPrompt),
   resetTabSession: (tabId) => ipcRenderer.send(IPC.RESET_TAB_SESSION, tabId),
   listSessions: (projectPath?: string, provider?: string) => ipcRenderer.invoke(IPC.LIST_SESSIONS, projectPath, provider),
@@ -146,6 +150,12 @@ const api: CluiAPI = {
     const handler = (_e: Electron.IpcRendererEvent, status: any) => callback(status)
     ipcRenderer.on(IPC.SKILL_STATUS, handler)
     return () => ipcRenderer.removeListener(IPC.SKILL_STATUS, handler)
+  },
+
+  onRetryStatus: (callback) => {
+    const handler = (_e: Electron.IpcRendererEvent, tabId: string, status: { active: boolean; attempt: number; maxAttempts: number; reason: string; delayMs: number }) => callback(tabId, status)
+    ipcRenderer.on('clui:retry-status', handler)
+    return () => ipcRenderer.removeListener('clui:retry-status', handler)
   },
 
   onCodexQuotaUpdate: (callback: (quota: CodexQuota) => void) => {

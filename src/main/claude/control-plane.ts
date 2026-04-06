@@ -3,6 +3,7 @@ import { RunManager } from './run-manager'
 import { PtyRunManager } from './pty-run-manager'
 import { PermissionServer, maskSensitiveFields } from '../hooks/permission-server'
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
+import { isRetryableError } from './retry-manager'
 import { log as _log } from '../logger'
 import type {
   TabStatus,
@@ -78,6 +79,10 @@ export class ControlPlane extends EventEmitter {
   private hookServerReady: Promise<void>
   private warmHandles = new Map<string, { requestId: string; cwd: string; model?: string }>()
   private resumedRequests = new Map<string, { tabId: string; options: RunOptions }>()
+  /** Track options for active retries so re-failed retries can re-schedule */
+  private activeRetryOptions = new Map<string, { tabId: string; options: RunOptions; attempt: number; reason: string }>()
+  /** Last request options per requestId — used by retry to reconstruct RunOptions */
+  private lastRequestOptions = new Map<string, RunOptions>()
 
   constructor(interactivePty = false) {
     super()
@@ -292,23 +297,14 @@ export class ControlPlane extends EventEmitter {
         return
       }
 
-      if (code === 0) {
-        this._setTabStatus(tabId, 'completed')
-      } else if (signal === 'SIGINT' || signal === 'SIGKILL') {
-        this._setTabStatus(tabId, 'failed')
-      } else {
-        const enriched = this.runManager.getEnrichedError(requestId, code)
-        this.emit('error', tabId, enriched)
-        this._setTabStatus(tabId, code === null ? 'dead' : 'failed')
-      }
-
-      if (inflight) {
-        inflight.resolve()
-        this.inflightRequests.delete(requestId)
-      }
-
-      this.resumedRequests.delete(requestId)
-      this._processQueue(tabId)
+      this._tryAutomaticRetry({
+        requestId,
+        tabId,
+        tab,
+        code,
+        signal,
+        inflight,
+      })
     })
 
     this.runManager.on('error', (requestId: string, err: Error) => {
@@ -834,6 +830,8 @@ export class ControlPlane extends EventEmitter {
       options = { ...options, cliPermissionMode: 'bypassPermissions' }
     }
 
+    this.lastRequestOptions.set(requestId, options)
+
     tab.activeRequestId = requestId
     if (!this.initRequestIds.has(requestId)) tab.promptCount++
     tab.lastActivityAt = Date.now()
@@ -1022,6 +1020,25 @@ export class ControlPlane extends EventEmitter {
     return this.runManager.writeToStdin(tab.activeRequestId, msg)
   }
 
+  respondToUserQuestion(tabId: string, answer: string): boolean {
+    const tab = this.tabs.get(tabId)
+    if (!tab?.activeRequestId) return false
+    const userMsg = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: answer }],
+      },
+    })
+    return this.runManager.writeToStdin(tab.activeRequestId, {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: answer }],
+      },
+    })
+  }
+
   // ─── Health ───
 
   getHealth(): HealthReport {
@@ -1108,6 +1125,152 @@ export class ControlPlane extends EventEmitter {
     tab.status = newStatus
     log(`Tab ${tabId}: ${oldStatus} → ${newStatus}`)
     this.emit('tab-status-change', tabId, newStatus, oldStatus)
+  }
+
+  private _calcBackoffDelay(attempt: number): number {
+    const base = 500
+    const maxDelay = 8000
+    const delay = Math.min(base * Math.pow(2, attempt), maxDelay)
+    const jitter = 1 - Math.random() * 0.25
+    return Math.round(delay * jitter)
+  }
+
+  private _emitRetryFailed(tabId: string, attempt: number, reason: string): void {
+    this.emit('retry-status', tabId, {
+      active: false,
+      attempt: 0,
+      maxAttempts: 3,
+      reason: `All retries exhausted: ${reason}`,
+      delayMs: 0,
+    })
+  }
+
+  private _tryAutomaticRetry(params: {
+    requestId: string
+    tabId: string
+    tab: TabRegistryEntry
+    code: number | null
+    signal: string | null
+    inflight: InflightRequest | undefined
+  }): void {
+    const { requestId, tabId, tab, code, signal, inflight } = params
+
+    if (signal === 'SIGINT' || signal === 'SIGKILL') {
+      this.lastRequestOptions.delete(requestId)
+      this._setTabStatus(tabId, 'failed')
+      if (inflight) {
+        inflight.resolve()
+        this.inflightRequests.delete(requestId)
+      }
+      this._processQueue(tabId)
+      return
+    }
+
+    const enriched = this.getEnrichedError(requestId, code)
+    const allErrorLines = enriched.stderrTail.length > 0 ? enriched.stderrTail.slice() : []
+    if (enriched.message) {
+      allErrorLines.push(enriched.message)
+    }
+
+    const { retryable, reason } = isRetryableError(allErrorLines)
+
+    if (!retryable) {
+      this.lastRequestOptions.delete(requestId)
+      if (code === 0 && enriched.stderrTail.length > 0) {
+        this._setTabStatus(tabId, 'completed')
+        const lastStderr = enriched.stderrTail.slice(-3).join(' ')
+        if (lastStderr.trim()) {
+          this.emit('event', tabId, {
+            type: 'error',
+            message: lastStderr.trim(),
+            isError: false,
+          })
+        }
+      } else {
+        this._setTabStatus(tabId, code === 0 ? 'completed' : 'failed')
+        if (code !== 0) {
+          this.emit('error', tabId, enriched)
+        }
+      }
+      if (inflight) {
+        inflight.resolve()
+        this.inflightRequests.delete(requestId)
+      }
+      this._processQueue(tabId)
+      return
+    }
+
+    const existingRetry = this.activeRetryOptions.get(requestId)
+    const attempt = existingRetry ? existingRetry.attempt : 0
+    const nextAttempt = attempt + 1
+
+    if (nextAttempt >= 3) {
+      log(`All retries exhausted for tab ${tabId.substring(0, 8)}… (${reason})`)
+      this.activeRetryOptions.delete(requestId)
+      this.lastRequestOptions.delete(requestId)
+      this._emitRetryFailed(tabId, attempt, reason)
+      this._setTabStatus(tabId, 'failed')
+      this.emit('error', tabId, enriched)
+      if (inflight) {
+        inflight.resolve()
+        this.inflightRequests.delete(requestId)
+      }
+      this._processQueue(tabId)
+      return
+    }
+
+    const delayMs = this._calcBackoffDelay(attempt)
+    const newRequestId = `retry-${crypto.randomUUID().substring(0, 8)}`
+
+    log(`Auto-retry ${nextAttempt}/3 for tab ${tabId.substring(0, 8)}… in ${delayMs}ms (${reason})`)
+
+    this.emit('retry-status', tabId, {
+      active: true,
+      attempt: nextAttempt,
+      maxAttempts: 3,
+      reason,
+      delayMs,
+    })
+
+    const baseOptions = this.lastRequestOptions.get(requestId) ?? {
+      prompt: '',
+      projectPath: tabId ? (process.env.HOME || process.cwd()) : process.cwd(),
+    }
+
+    const retryOptions: RunOptions = { ...baseOptions }
+
+    this.activeRetryOptions.set(newRequestId, {
+      tabId,
+      options: retryOptions,
+      attempt: nextAttempt,
+      reason,
+    })
+
+    tab.activeRequestId = null
+    tab.runPid = null
+
+    if (inflight) {
+      inflight.resolve()
+      this.inflightRequests.delete(requestId)
+    }
+
+    setTimeout(async () => {
+      this.emit('retry-status', tabId, {
+        active: false,
+        attempt: 0,
+        maxAttempts: 3,
+        reason: '',
+        delayMs: 0,
+      })
+      this.activeRetryOptions.delete(newRequestId)
+      try {
+        await this._dispatch(tabId, newRequestId, retryOptions)
+      } catch (err) {
+        log(`Auto-retry dispatch failed: ${(err as Error).message}`)
+        this._setTabStatus(tabId, 'failed')
+        this._processQueue(tabId)
+      }
+    }, delayMs)
   }
 
   // ─── Shutdown ───

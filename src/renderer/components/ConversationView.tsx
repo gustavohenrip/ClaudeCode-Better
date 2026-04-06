@@ -12,6 +12,7 @@ import { useSessionStore, useActiveTab } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
 import { PermissionCard } from './PermissionCard'
 import { PermissionDeniedCard } from './PermissionDeniedCard'
+import { AskUserQuestionCard } from './AskUserQuestionCard'
 import { DiffViewer } from './DiffViewer'
 import { useColors, useThemeStore } from '../theme'
 import type { Message, Attachment } from '../../shared/types'
@@ -213,6 +214,16 @@ export function ConversationView() {
               tabId={tab.id}
               permission={tab.permissionQueue[0]}
               queueLength={tab.permissionQueue.length}
+            />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {tab.askUserQuestions.length > 0 && (
+            <AskUserQuestionCard
+              tabId={tab.id}
+              question={tab.askUserQuestions[0]}
+              queueLength={tab.askUserQuestions.length}
             />
           )}
         </AnimatePresence>

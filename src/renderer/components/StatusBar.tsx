@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database } from '@phosphor-icons/react'
+import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database, WarningCircle, ArrowCounterClockwise } from '@phosphor-icons/react'
 import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { useCodexQuota } from '../hooks/useCodexQuota'
 import { usePopoverLayer } from './PopoverLayer'
@@ -18,13 +18,14 @@ function ProviderToggle() {
   const colors = useColors()
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isCodex = provider === 'codex'
+  const isOpenClaude = provider === 'openclaude'
   const { quota } = useCodexQuota(isCodex)
 
   const [tooltip, setTooltip] = useState('')
 
   useEffect(() => {
     if (!isCodex) {
-      setTooltip('Switch to Codex')
+      setTooltip('Switch provider')
       return
     }
     if (!quota) {
@@ -36,15 +37,19 @@ function ProviderToggle() {
     setTooltip(`${quota.planType} | 5h: ${pLeft}% left | 7d: ${sLeft}% left`)
   }, [isCodex, quota])
 
+  const providerColor = isCodex ? '#888888' : isOpenClaude ? colors.accent : colors.accent
+  const providerBg = isCodex ? 'rgba(136,136,136,0.08)' : isOpenClaude ? colors.accentSoft : colors.accentSoft
+  const providerLabel = isCodex ? 'Codex' : isOpenClaude ? 'OpenRouter' : 'Claude'
+
   return (
     <motion.button
       onClick={() => { if (!isBusy) switchProvider() }}
       className="flex items-center gap-1 text-[10px] rounded-full px-2 py-0.5 transition-colors"
       style={{
-        color: isCodex ? '#888888' : colors.accent,
+        color: providerColor,
         fontWeight: 600,
         cursor: isBusy ? 'not-allowed' : 'pointer',
-        background: isCodex ? 'rgba(136,136,136,0.08)' : 'rgba(217,119,87,0.08)',
+        background: providerBg,
       }}
       title={tooltip}
       whileHover={{ scale: isBusy ? 1 : 1.05 }}
@@ -52,10 +57,10 @@ function ProviderToggle() {
     >
       <span style={{
         width: 6, height: 6, borderRadius: '50%',
-        background: isCodex ? '#888888' : colors.accent,
+        background: providerColor,
         display: 'inline-block',
       }} />
-      {isCodex ? 'Codex' : 'Claude'}
+      {providerLabel}
     </motion.button>
   )
 }
@@ -65,6 +70,7 @@ function ProviderToggle() {
 function ModelPicker() {
   const preferredClaudeModel = useSessionStore((s) => s.preferredModel)
   const preferredCodexModel = useSessionStore((s) => s.preferredCodexModel)
+  const openRouter = useSessionStore((s) => s.openRouter)
   const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
   const tab = useActiveTab()
   const popoverLayer = usePopoverLayer()
@@ -77,6 +83,7 @@ function ModelPicker() {
 
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isCodex = tab?.provider === 'codex'
+  const isOpenClaude = tab?.provider === 'openclaude'
   const models = isCodex ? CODEX_MODELS : AVAILABLE_MODELS
 
   const updatePos = useCallback(() => {
@@ -101,7 +108,7 @@ function ModelPicker() {
   }, [open])
 
   const handleToggle = () => {
-    if (isBusy) return
+    if (isBusy || isOpenClaude) return
     if (!open) updatePos()
     setOpen((o) => !o)
   }
@@ -109,6 +116,9 @@ function ModelPicker() {
   const preferredModel = isCodex ? preferredCodexModel : preferredClaudeModel
 
   const activeLabel = (() => {
+    if (isOpenClaude) {
+      return openRouter.model || 'OpenRouter model'
+    }
     if (isCodex) {
       if (preferredCodexModel) {
         const m = CODEX_MODELS.find((m) => m.id === preferredCodexModel)
@@ -141,13 +151,13 @@ function ModelPicker() {
           color: colors.textTertiary,
           cursor: isBusy ? 'not-allowed' : 'pointer',
         }}
-        title={isBusy ? 'Stop the task to change model' : 'Switch model'}
+        title={isOpenClaude ? 'Model from OpenRouter settings' : (isBusy ? 'Stop the task to change model' : 'Switch model')}
       >
         {activeLabel}
-        <CaretDown size={10} style={{ opacity: 0.6 }} />
+        {!isOpenClaude && <CaretDown size={10} style={{ opacity: 0.6 }} />}
       </button>
 
-      {popoverLayer && open && createPortal(
+      {popoverLayer && open && !isOpenClaude && createPortal(
         <motion.div
           ref={popoverRef}
           data-clui-ui
@@ -447,6 +457,31 @@ function TokenBadge() {
   )
 }
 
+function RetryBadge() {
+  const tab = useActiveTab()
+  const colors = useColors()
+
+  if (!tab?.retryStatus?.active) return null
+
+  const { attempt, maxAttempts, reason } = tab.retryStatus
+  const nextAttempt = attempt + 1
+  const retryColor = reason.includes('Rate') ? '#f59e0b' : '#ef4444'
+
+  return (
+    <motion.div
+      className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full"
+      style={{ color: colors.accent, background: colors.accentSoft }}
+      title={`Retrying: ${reason}`}
+      animate={{ opacity: [1, 0.5, 1] }}
+      transition={{ duration: 1.5, repeat: Infinity }}
+    >
+      <ArrowCounterClockwise size={10} weight="bold" />
+      <span>Retry {nextAttempt}/{maxAttempts}</span>
+      <span style={{ color: retryColor, fontSize: 9 }}>{reason}</span>
+    </motion.div>
+  )
+}
+
 /* ─── StatusBar ─── */
 
 function ReasoningBadge() {
@@ -687,6 +722,8 @@ export function StatusBar() {
         <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
 
         <TokenBadge />
+
+        <RetryBadge />
       </div>
 
       {/* Right — Open in CLI */}

@@ -1,4 +1,14 @@
-export type Provider = 'claude' | 'codex'
+export type Provider = 'claude' | 'openclaude' | 'codex'
+
+export interface OpenRouterConfig {
+  enabled: boolean
+  apiKey: string
+  baseUrl: string
+  model: string
+  httpReferer?: string
+  appTitle?: string
+  openClaudePath?: string
+}
 
 // ─── Claude Code Stream Event Types (verified from v2.1.63) ───
 
@@ -133,6 +143,22 @@ export interface PermissionRequest {
   options: Array<{ optionId: string; kind?: string; label: string }>
 }
 
+export interface AskUserQuestionOption {
+  id: string
+  label: string
+  description?: string
+  isError?: boolean
+}
+
+export interface AskUserQuestionPayload {
+  questionId: string
+  question: string
+  header?: string
+  options: AskUserQuestionOption[]
+  multiSelect: boolean
+  allowOtherText: boolean
+}
+
 export interface Attachment {
   id: string
   type: 'image' | 'file'
@@ -156,6 +182,8 @@ export interface TabState {
   permissionQueue: PermissionRequest[]
   /** Fallback card when tools were denied and no interactive permission is available */
   permissionDenied: { tools: Array<{ toolName: string; toolUseId: string }> } | null
+  /** Active ask-user questions from the AI */
+  askUserQuestions: AskUserQuestionPayload[]
   attachments: Attachment[]
   messages: Message[]
   title: string
@@ -177,6 +205,8 @@ export interface TabState {
   additionalDirs: string[]
   /** Accumulated token usage for the current session */
   tokenUsage: { input: number; output: number; cacheRead: number; cacheCreation: number }
+  /** Active retry state (null if not retrying) */
+  retryStatus: { active: boolean; attempt: number; maxAttempts: number; reason: string; delayMs: number } | null
 }
 
 export interface Message {
@@ -215,6 +245,7 @@ export type NormalizedEvent =
   | { type: 'codex_rate_limits'; rateLimits: Record<string, unknown> }
   | { type: 'usage'; usage: UsageData }
   | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
+  | { type: 'ask_user_question'; questionId: string; question: string; header?: string; options: Array<{ id: string; label: string; description?: string }>; multiSelect: boolean; allowOtherText?: boolean }
   | { type: 'compact_complete'; clearedTokens: number }
 
 // ─── Run Options ───
@@ -238,6 +269,7 @@ export interface RunOptions {
   /** Thinking mode passed via --thinking */
   thinking?: 'adaptive' | 'disabled'
   cliPermissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions'
+  openRouter?: OpenRouterConfig
 }
 
 // ─── Control Plane Types ───
@@ -337,6 +369,7 @@ export const IPC = {
   PASTE_IMAGE: 'clui:paste-image',
   GET_DIAGNOSTICS: 'clui:get-diagnostics',
   RESPOND_PERMISSION: 'clui:respond-permission',
+  RESPOND_USER_QUESTION: 'clui:respond-user-question',
   INIT_SESSION: 'clui:init-session',
   RESET_TAB_SESSION: 'clui:reset-tab-session',
   ANIMATE_HEIGHT: 'clui:animate-height',

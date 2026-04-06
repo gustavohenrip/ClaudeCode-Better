@@ -336,6 +336,89 @@ const codexLightColors = {
   accentBorderMedium: 'rgba(136, 136, 136, 0.25)',
 } as const
 
+const openclaudeDarkColors = {
+  containerBg: '#000000',
+  containerBgCollapsed: '#000000',
+  containerBorder: '#1a1a1a',
+  containerShadow: '0 8px 28px rgba(0, 0, 0, 0.6), 0 1px 6px rgba(0, 0, 0, 0.4)',
+  cardShadow: '0 2px 8px rgba(0,0,0,0.5)',
+  cardShadowCollapsed: '0 2px 6px rgba(0,0,0,0.6)',
+  surfacePrimary: '#0d0d0d',
+  surfaceSecondary: '#141414',
+  surfaceHover: 'rgba(52, 211, 153, 0.04)',
+  surfaceActive: 'rgba(52, 211, 153, 0.06)',
+  inputBg: 'transparent',
+  inputBorder: '#1a1a1a',
+  inputFocusBorder: 'rgba(52, 211, 153, 0.35)',
+  inputPillBg: '#0a0a0a',
+  textPrimary: '#e2e2e2',
+  textSecondary: '#a8a8a8',
+  textTertiary: '#5a5a5a',
+  textMuted: '#1a1a1a',
+  accent: '#34d399',
+  accentLight: 'rgba(52, 211, 153, 0.1)',
+  accentSoft: 'rgba(52, 211, 153, 0.15)',
+  statusIdle: '#5a5a5a',
+  statusRunning: '#34d399',
+  statusRunningBg: 'rgba(52, 211, 153, 0.1)',
+  statusComplete: '#34d399',
+  statusCompleteBg: 'rgba(52, 211, 153, 0.1)',
+  statusError: '#ef4444',
+  statusErrorBg: 'rgba(239, 68, 68, 0.08)',
+  statusDead: '#ef4444',
+  statusPermission: '#34d399',
+  statusPermissionGlow: 'rgba(52, 211, 153, 0.35)',
+  tabActive: '#0d0d0d',
+  tabActiveBorder: '#1a1a1a',
+  tabInactive: 'transparent',
+  tabHover: 'rgba(52, 211, 153, 0.04)',
+  userBubble: '#0d0d0d',
+  userBubbleBorder: '#1a1a1a',
+  userBubbleText: '#e2e2e2',
+  toolBg: '#0d0d0d',
+  toolBorder: '#1a1a1a',
+  toolRunningBorder: 'rgba(52, 211, 153, 0.25)',
+  toolRunningBg: 'rgba(52, 211, 153, 0.04)',
+  timelineLine: '#1a1a1a',
+  timelineNode: 'rgba(52, 211, 153, 0.2)',
+  timelineNodeActive: '#34d399',
+  scrollThumb: 'rgba(255, 255, 255, 0.12)',
+  scrollThumbHover: 'rgba(255, 255, 255, 0.22)',
+  stopBg: '#ef4444',
+  stopHover: '#dc2626',
+  sendBg: '#34d399',
+  sendHover: '#28b886',
+  sendDisabled: 'rgba(52, 211, 153, 0.25)',
+  popoverBg: '#050505',
+  popoverBorder: '#1a1a1a',
+  popoverShadow: '0 4px 20px rgba(0,0,0,0.5), 0 1px 4px rgba(0,0,0,0.3)',
+  codeBg: '#080808',
+  micBg: '#0d0d0d',
+  micColor: '#a8a8a8',
+  micDisabled: '#1a1a1a',
+  placeholder: '#4a4a4a',
+  btnDisabled: '#1a1a1a',
+  textOnAccent: '#000000',
+  btnHoverColor: '#a8a8a8',
+  btnHoverBg: '#141414',
+  accentBorder: 'rgba(52, 211, 153, 0.19)',
+  accentBorderMedium: 'rgba(52, 211, 153, 0.25)',
+  permissionBorder: 'rgba(245, 158, 11, 0.3)',
+  permissionShadow: '0 2px 12px rgba(245, 158, 11, 0.08)',
+  permissionHeaderBg: 'rgba(245, 158, 11, 0.06)',
+  permissionHeaderBorder: 'rgba(245, 158, 11, 0.12)',
+  permissionAllowBg: 'rgba(52, 211, 153, 0.1)',
+  permissionAllowHoverBg: 'rgba(52, 211, 153, 0.22)',
+  permissionAllowBorder: 'rgba(52, 211, 153, 0.25)',
+  permissionDenyBg: 'rgba(239, 68, 68, 0.08)',
+  permissionDenyHoverBg: 'rgba(239, 68, 68, 0.18)',
+  permissionDenyBorder: 'rgba(239, 68, 68, 0.22)',
+  permissionDeniedBorder: 'rgba(239, 68, 68, 0.3)',
+  permissionDeniedHeaderBorder: 'rgba(239, 68, 68, 0.12)',
+} as const
+
+const openclaudeLightColors = openclaudeDarkColors
+
 export type ColorPalette = { [K in keyof typeof darkColors]: string }
 
 // ─── Theme store ───
@@ -357,16 +440,16 @@ interface ThemeState {
   expandedUI: boolean
   effort: EffortLevel
   thinkingEnabled: boolean
-  defaultProvider: 'claude' | 'codex'
-  activeProvider: 'claude' | 'codex'
+  defaultProvider: 'claude' | 'openclaude' | 'codex'
+  activeProvider: 'claude' | 'openclaude' | 'codex'
   globalRules: string
   rulesProfiles: RulesProfile[]
   activeProfileId: string | null
   freeRules: string
   _systemIsDark: boolean
   setIsDark: (isDark: boolean) => void
-  setDefaultProvider: (provider: 'claude' | 'codex') => void
-  setActiveProvider: (provider: 'claude' | 'codex') => void
+  setDefaultProvider: (provider: 'claude' | 'openclaude' | 'codex') => void
+  setActiveProvider: (provider: 'claude' | 'openclaude' | 'codex') => void
   setThemeMode: (mode: ThemeMode) => void
   setSoundEnabled: (enabled: boolean) => void
   setExpandedUI: (expanded: boolean) => void
@@ -394,11 +477,13 @@ function syncTokensToCss(tokens: ColorPalette): void {
   }
 }
 
-function applyTheme(isDark: boolean, provider?: 'claude' | 'codex'): void {
+function applyTheme(isDark: boolean, provider?: 'claude' | 'openclaude' | 'codex'): void {
   document.documentElement.classList.toggle('dark', isDark)
   document.documentElement.classList.toggle('light', !isDark)
   if (provider === 'codex') {
     syncTokensToCss((isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette)
+  } else if (provider === 'openclaude') {
+    syncTokensToCss(openclaudeDarkColors as unknown as ColorPalette)
   } else {
     syncTokensToCss(isDark ? darkColors : lightColors)
   }
@@ -443,7 +528,7 @@ function saveRulesV1(state: { profiles: RulesProfile[]; activeProfileId: string 
   try { localStorage.setItem(RULES_V1_KEY, JSON.stringify({ version: 1, ...state })) } catch {}
 }
 
-function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'codex' } {
+function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'openclaude' | 'codex' } {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (raw) {
@@ -454,14 +539,18 @@ function loadSettings(): { themeMode: ThemeMode; soundEnabled: boolean; expanded
         expandedUI: typeof parsed.expandedUI === 'boolean' ? parsed.expandedUI : false,
         effort: (['low', 'medium', 'high', 'max'] as EffortLevel[]).includes(parsed.effort) ? parsed.effort : 'medium',
         thinkingEnabled: typeof parsed.thinkingEnabled === 'boolean' ? parsed.thinkingEnabled : true,
-        defaultProvider: parsed.defaultProvider === 'codex' ? 'codex' : 'claude',
+        defaultProvider: parsed.defaultProvider === 'codex'
+          ? 'codex'
+          : parsed.defaultProvider === 'openclaude'
+            ? 'openclaude'
+            : 'claude',
       }
     }
   } catch {}
   return { themeMode: 'dark', soundEnabled: true, expandedUI: false, effort: 'medium', thinkingEnabled: true, defaultProvider: 'claude' }
 }
 
-function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'codex' }): void {
+function saveSettings(s: { themeMode: ThemeMode; soundEnabled: boolean; expandedUI: boolean; effort: EffortLevel; thinkingEnabled: boolean; defaultProvider: 'claude' | 'openclaude' | 'codex' }): void {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch {}
 }
 
@@ -494,17 +583,23 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     set({ activeProvider: provider })
     const palette = provider === 'codex'
       ? (s.isDark ? codexDarkColors : codexLightColors)
+      : provider === 'openclaude'
+      ? openclaudeDarkColors
       : (s.isDark ? darkColors : lightColors)
     syncTokensToCss(palette as unknown as ColorPalette)
   },
   setIsDark: (isDark) => {
     set({ isDark })
-    applyTheme(isDark, get().activeProvider)
+    const active = get().activeProvider
+    const provider = active === 'openclaude' ? undefined : active
+    applyTheme(isDark, provider)
   },
   setThemeMode: (mode) => {
     const resolved = mode === 'system' ? get()._systemIsDark : mode === 'dark'
     set({ themeMode: mode, isDark: resolved })
-    applyTheme(resolved, get().activeProvider)
+    const active = get().activeProvider
+    const provider = active === 'openclaude' ? undefined : active
+    applyTheme(resolved, provider)
     const s = get()
     saveSettings({ themeMode: mode, soundEnabled: s.soundEnabled, expandedUI: s.expandedUI, effort: s.effort, thinkingEnabled: s.thinkingEnabled, defaultProvider: s.defaultProvider })
   },
@@ -599,7 +694,8 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     if (s._systemIsDark === isDark) return
     if (s.themeMode === 'system') {
       set({ _systemIsDark: isDark, isDark })
-      applyTheme(isDark, s.activeProvider)
+      const provider = s.activeProvider === 'openclaude' ? undefined : s.activeProvider
+      applyTheme(isDark, provider)
     } else {
       set({ _systemIsDark: isDark })
     }
@@ -616,12 +712,18 @@ export function useColors(): ColorPalette {
   if (provider === 'codex') {
     return (isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette
   }
+  if (provider === 'openclaude') {
+    return openclaudeDarkColors as unknown as ColorPalette
+  }
   return isDark ? darkColors : lightColors
 }
 
-export function getColors(isDark: boolean, provider?: 'claude' | 'codex'): ColorPalette {
+export function getColors(isDark: boolean, provider?: 'claude' | 'openclaude' | 'codex'): ColorPalette {
   if (provider === 'codex') {
     return (isDark ? codexDarkColors : codexLightColors) as unknown as ColorPalette
+  }
+  if (provider === 'openclaude') {
+    return openclaudeDarkColors as unknown as ColorPalette
   }
   return isDark ? darkColors : lightColors
 }

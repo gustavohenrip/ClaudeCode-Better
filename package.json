@@ -40,6 +40,7 @@
       "dist/preload/**/*",
       "dist/renderer/**/*",
       "resources/**/*",
+      "vendor/openclaude/**/*",
       "package.json"
     ],
     "mac": {
@@ -62,7 +63,16 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "extraResources": [
+      {
+        "from": "resources/mcp",
+        "to": "mcp",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
