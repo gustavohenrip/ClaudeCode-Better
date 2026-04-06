@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, clipboard, Notification } from 'electron'
 import type { OpenDialogOptions } from 'electron'
-import { join, resolve, dirname, isAbsolute } from 'path'
-import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync, watch as fsWatch, type FSWatcher } from 'fs'
+import { join, resolve, dirname, isAbsolute, delimiter } from 'path'
+import { existsSync, readdirSync, statSync, createReadStream, readFileSync, writeFileSync, mkdirSync, watch as fsWatch, openSync, readSync, closeSync, type FSWatcher } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { createInterface } from 'readline'
@@ -384,7 +384,9 @@ let quotaRefreshInterval: ReturnType<typeof setInterval> | null = null
 let quotaLastUpdatedAt = 0
 
 const QUOTA_LOOKBACK_DAYS = 14
-const QUOTA_BACKGROUND_REFRESH_MS = 3_000
+const QUOTA_BACKGROUND_REFRESH_MS = 20_000
+const QUOTA_TAIL_READ_BYTES = 1024 * 1024
+const QUOTA_MAX_CANDIDATE_FILES = 4
 
 const QUOTA_FALLBACK: CodexQuota = {
   primaryUsedPercent: 0, primaryWindowMinutes: 300, primaryResetsAt: 0,
@@ -393,6 +395,7 @@ const QUOTA_FALLBACK: CodexQuota = {
 }
 
 let quotaPingInFlight = false
+let quotaPingSupported = true
 
 function clampPercent(value: number | undefined, fallback: number = 0): number {
   const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
@@ -448,31 +451,24 @@ function rollResetForward(resetAt: number, windowMinutes: number, nowSec: number
 }
 
 function requestQuotaPing(): void {
-  if (quotaPingInFlight) return
+  if (!quotaPingSupported || quotaPingInFlight) return
   quotaPingInFlight = true
   pingCodexForQuota()
 }
 
-function applyQuotaResets(q: CodexQuota): { quota: CodexQuota; adjustedExpiredReset: boolean } {
+function applyQuotaResets(q: CodexQuota): CodexQuota {
   const nowSec = Math.floor(Date.now() / 1000)
   const next = normalizeQuota(q)
-  let adjustedExpiredReset = false
 
   if (next.primaryResetsAt && next.primaryResetsAt <= nowSec) {
     next.primaryResetsAt = rollResetForward(next.primaryResetsAt, next.primaryWindowMinutes, nowSec)
-    adjustedExpiredReset = true
   }
 
   if (next.secondaryResetsAt && next.secondaryResetsAt <= nowSec) {
     next.secondaryResetsAt = rollResetForward(next.secondaryResetsAt, next.secondaryWindowMinutes, nowSec)
-    adjustedExpiredReset = true
   }
 
-  if (adjustedExpiredReset) {
-    requestQuotaPing()
-  }
-
-  return { quota: next, adjustedExpiredReset }
+  return next
 }
 
 function scheduleQuotaResetRefresh(quota: CodexQuota): void {
@@ -498,12 +494,12 @@ function scheduleQuotaResetRefresh(quota: CodexQuota): void {
 
 function storeCodexQuota(nextQuota: CodexQuota, options?: { broadcast?: boolean; forceBroadcast?: boolean; requestPing?: boolean }): CodexQuota {
   const previous = cachedCodexQuota
-  const { quota, adjustedExpiredReset } = applyQuotaResets(nextQuota)
+  const quota = applyQuotaResets(nextQuota)
   cachedCodexQuota = quota
   quotaLastUpdatedAt = Date.now()
   scheduleQuotaResetRefresh(quota)
 
-  if (options?.requestPing || adjustedExpiredReset) {
+  if (options?.requestPing) {
     requestQuotaPing()
   }
 
@@ -516,18 +512,36 @@ function storeCodexQuota(nextQuota: CodexQuota, options?: { broadcast?: boolean;
 }
 
 function findCodexBin(): string {
-  const candidates = ['/opt/homebrew/bin/codex', '/usr/local/bin/codex', join(homedir(), '.npm-global/bin/codex')]
+  const candidates = process.platform === 'win32'
+    ? [
+      join(homedir(), 'AppData', 'Roaming', 'npm', 'codex.cmd'),
+      join(homedir(), 'AppData', 'Roaming', 'npm', 'codex.exe'),
+      join(homedir(), '.npm-global', 'bin', 'codex.cmd'),
+      join(homedir(), '.npm-global', 'bin', 'codex.exe'),
+    ]
+    : ['/opt/homebrew/bin/codex', '/usr/local/bin/codex', join(homedir(), '.npm-global/bin/codex')]
   for (const c of candidates) { try { if (existsSync(c)) return c } catch {} }
-  return 'codex'
+  return process.platform === 'win32' ? 'codex.cmd' : 'codex'
 }
 
 function pingCodexForQuota(): void {
   const codexBin = findCodexBin()
+  const codexDir = dirname(codexBin)
+  const pathPrefix = codexDir && codexDir !== '.' ? `${codexDir}${delimiter}` : ''
   const { spawn: spawnChild } = require('child_process')
-  const child = spawnChild(codexBin, ['exec', '--json', '--full-auto', '-'], {
-    stdio: ['pipe', 'pipe', 'ignore'],
-    env: { ...process.env, PATH: `${dirname(codexBin)}:${process.env.PATH || ''}` },
-  })
+  let child: any
+  try {
+    child = spawnChild(codexBin, ['exec', '--json', '--full-auto', '-'], {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: { ...process.env, PATH: `${pathPrefix}${process.env.PATH || ''}` },
+      windowsHide: true,
+      shell: process.platform === 'win32' && codexBin.toLowerCase().endsWith('.cmd'),
+    })
+  } catch {
+    quotaPingSupported = false
+    quotaPingInFlight = false
+    return
+  }
   let finalized = false
   const finalize = () => {
     if (finalized) return
@@ -535,8 +549,8 @@ function pingCodexForQuota(): void {
     quotaPingInFlight = false
   }
   child.stdout?.on('data', () => {})
-  child.stdin.write('hi')
-  child.stdin.end()
+  child.stdin?.write('hi')
+  child.stdin?.end()
   const killTimer = setTimeout(() => {
     try { child.kill() } catch {}
     setTimeout(() => { finalize() }, 1000)
@@ -549,6 +563,7 @@ function pingCodexForQuota(): void {
     }, 300)
   })
   child.on('error', () => {
+    quotaPingSupported = false
     clearTimeout(killTimer)
     finalize()
   })
@@ -634,7 +649,8 @@ function refreshCodexQuota(): CodexQuota {
     })
 
     let best: { quota: CodexQuota; observedAt: number } | null = null
-    for (const file of candidates) {
+    const inspectFiles = candidates.slice(0, QUOTA_MAX_CANDIDATE_FILES)
+    for (const file of inspectFiles) {
       const result = extractRateLimitsFromRollout(file)
       if (result && (!best || result.observedAt > best.observedAt)) {
         best = result
@@ -647,12 +663,34 @@ function refreshCodexQuota(): CodexQuota {
   }
 }
 
+function readRolloutTail(filePath: string): string {
+  try {
+    const size = statSync(filePath).size
+    if (size <= 0) return ''
+
+    const bytesToRead = Math.min(size, QUOTA_TAIL_READ_BYTES)
+    const offset = Math.max(0, size - bytesToRead)
+    const buffer = Buffer.allocUnsafe(bytesToRead)
+    const fd = openSync(filePath, 'r')
+    try {
+      const bytesRead = readSync(fd, buffer, 0, bytesToRead, offset)
+      if (bytesRead <= 0) return ''
+      return buffer.subarray(0, bytesRead).toString('utf-8')
+    } finally {
+      try { closeSync(fd) } catch {}
+    }
+  } catch {
+    return ''
+  }
+}
+
 function extractRateLimitsFromRollout(filePath: string): { quota: CodexQuota; observedAt: number } | null {
   try {
     let fallbackObservedAt = 0
     try { fallbackObservedAt = statSync(filePath).mtimeMs } catch {}
 
-    const content = readFileSync(filePath, 'utf-8')
+    const content = readRolloutTail(filePath)
+    if (!content) return null
     const lines = content.split('\n').filter((l: string) => l.trim())
     for (let i = lines.length - 1; i >= 0; i--) {
       try {

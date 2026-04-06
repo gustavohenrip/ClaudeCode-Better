@@ -1154,8 +1154,10 @@ export class ControlPlane extends EventEmitter {
     inflight: InflightRequest | undefined
   }): void {
     const { requestId, tabId, tab, code, signal, inflight } = params
+    const existingRetry = this.activeRetryOptions.get(requestId)
 
     if (signal === 'SIGINT' || signal === 'SIGKILL') {
+      this.activeRetryOptions.delete(requestId)
       this.lastRequestOptions.delete(requestId)
       this._setTabStatus(tabId, 'failed')
       if (inflight) {
@@ -1175,6 +1177,7 @@ export class ControlPlane extends EventEmitter {
     const { retryable, reason } = isRetryableError(allErrorLines)
 
     if (!retryable) {
+      this.activeRetryOptions.delete(requestId)
       this.lastRequestOptions.delete(requestId)
       if (code === 0 && enriched.stderrTail.length > 0) {
         this._setTabStatus(tabId, 'completed')
@@ -1200,7 +1203,6 @@ export class ControlPlane extends EventEmitter {
       return
     }
 
-    const existingRetry = this.activeRetryOptions.get(requestId)
     const attempt = existingRetry ? existingRetry.attempt : 0
     const nextAttempt = attempt + 1
 
@@ -1262,10 +1264,17 @@ export class ControlPlane extends EventEmitter {
         reason: '',
         delayMs: 0,
       })
-      this.activeRetryOptions.delete(newRequestId)
+      const currentTab = this.tabs.get(tabId)
+      if (!currentTab || currentTab.activeRequestId) {
+        this.activeRetryOptions.delete(newRequestId)
+        this.lastRequestOptions.delete(newRequestId)
+        return
+      }
       try {
         await this._dispatch(tabId, newRequestId, retryOptions)
       } catch (err) {
+        this.activeRetryOptions.delete(newRequestId)
+        this.lastRequestOptions.delete(newRequestId)
         log(`Auto-retry dispatch failed: ${(err as Error).message}`)
         this._setTabStatus(tabId, 'failed')
         this._processQueue(tabId)

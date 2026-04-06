@@ -1,7 +1,7 @@
-import { spawn, execSync, ChildProcess } from 'child_process'
+import { spawn, execSync, execFileSync, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, dirname, delimiter } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import { StreamParser } from '../stream-parser'
 import { normalize, normalizeCodex } from './event-normalizer'
@@ -166,6 +166,31 @@ export class RunManager extends EventEmitter {
   }
 
   private _findOpenClaudeBinary(): string {
+    if (process.platform === 'win32') {
+      const candidates = [
+        join(process.cwd(), 'vendor', 'openclaude', 'bin', 'openclaude.cmd'),
+        join(__dirname, '..', '..', '..', 'vendor', 'openclaude', 'bin', 'openclaude.cmd'),
+        join(homedir(), 'AppData', 'Roaming', 'npm', 'openclaude.cmd'),
+        join(homedir(), '.npm-global', 'openclaude.cmd'),
+      ]
+
+      for (const c of candidates) {
+        try {
+          if (existsSync(c) && statSync(c).isFile()) {
+            return c
+          }
+        } catch {}
+      }
+
+      const resolvedCmd = this._resolveWindowsCommand('openclaude.cmd')
+      if (resolvedCmd) return resolvedCmd
+
+      const resolvedBare = this._resolveWindowsCommand('openclaude')
+      if (resolvedBare) return resolvedBare
+
+      return 'openclaude.cmd'
+    }
+
     const candidates = [
       join(process.cwd(), 'vendor', 'openclaude', 'bin', 'openclaude'),
       join(__dirname, '..', '..', '..', 'vendor', 'openclaude', 'bin', 'openclaude'),
@@ -192,17 +217,108 @@ export class RunManager extends EventEmitter {
     return 'openclaude'
   }
 
+  private _resolveWindowsCommand(command: string): string | null {
+    if (process.platform !== 'win32') return null
+    const value = command.trim()
+    if (!value) return null
+
+    const names = /\.(cmd|bat|exe)$/i.test(value)
+      ? [value]
+      : [`${value}.cmd`, `${value}.bat`, `${value}.exe`, value]
+
+    for (const name of names) {
+      try {
+        const resolved = execFileSync('where.exe', [name], {
+          encoding: 'utf-8',
+          timeout: 3000,
+          env: getCliEnv(),
+          windowsHide: true,
+        })
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line.length > 0)
+        if (resolved) return resolved
+      } catch {}
+    }
+
+    return null
+  }
+
+  private _resolveOpenClaudeBinary(configuredOpenClaude?: string): string {
+    const configured = configuredOpenClaude?.trim()
+    const candidate = configured && configured.length > 0 ? configured : this.openClaudeBinary
+    if (process.platform !== 'win32') return candidate
+
+    const raw = candidate.trim().replace(/^"(.*)"$/, '$1')
+    if (!raw) return this.openClaudeBinary
+    if (/\.(cmd|bat|exe)$/i.test(raw)) return raw
+
+    const hasPathSeparator = raw.includes('\\') || raw.includes('/')
+    if (hasPathSeparator) {
+      const pathCandidates = [`${raw}.cmd`, `${raw}.bat`, `${raw}.exe`]
+      for (const p of pathCandidates) {
+        try {
+          if (existsSync(p) && statSync(p).isFile()) {
+            return p
+          }
+        } catch {}
+      }
+      const fileName = raw.split(/[\\/]/).pop() || ''
+      const resolved = fileName ? this._resolveWindowsCommand(fileName) : null
+      if (resolved) return resolved
+      const fallback = this._resolveWindowsCommand('openclaude.cmd')
+      if (fallback) return fallback
+      return raw
+    }
+
+    const resolved = this._resolveWindowsCommand(raw)
+    if (resolved) return resolved
+    const fallback = this._resolveWindowsCommand('openclaude.cmd')
+    if (fallback) return fallback
+    return raw
+  }
+
+  private _resolveOpenClaudeNodeScript(binary: string): string | null {
+    if (process.platform !== 'win32') return null
+    const raw = binary.trim().replace(/^"(.*)"$/, '$1')
+    if (!/\.cmd$/i.test(raw)) return null
+    if (!existsSync(raw)) return null
+
+    const shimDir = dirname(raw)
+    const candidates = [
+      join(shimDir, 'node_modules', '@gitlawb', 'openclaude', 'bin', 'openclaude'),
+      join(shimDir, 'node_modules', '@gitlawb', 'openclaude', 'dist', 'cli.mjs'),
+    ]
+    for (const c of candidates) {
+      try {
+        if (existsSync(c) && statSync(c).isFile()) {
+          return c
+        }
+      } catch {}
+    }
+    return null
+  }
+
   private _getEnv(provider?: string, options?: RunOptions): NodeJS.ProcessEnv {
     const env = getCliEnv()
     const configuredOpenClaude = options?.openRouter?.openClaudePath?.trim()
     const binary = provider === 'codex'
       ? this.codexBinary
       : provider === 'openclaude'
-        ? (configuredOpenClaude || this.openClaudeBinary)
+        ? this._resolveOpenClaudeBinary(configuredOpenClaude)
         : this.claudeBinary
-    const binDir = binary.substring(0, binary.lastIndexOf('/'))
-    if (env.PATH && !env.PATH.includes(binDir)) {
-      env.PATH = `${binDir}:${env.PATH}`
+    const binDir = dirname(binary)
+    if (binDir && binDir !== '.') {
+      const pathEntries = (env.PATH || '')
+        .split(delimiter)
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+      const hasBinDir = pathEntries.some((entry) =>
+        process.platform === 'win32' ? entry.toLowerCase() === binDir.toLowerCase() : entry === binDir
+      )
+      if (!hasBinDir) {
+        env.PATH = env.PATH ? `${binDir}${delimiter}${env.PATH}` : binDir
+      }
     }
 
     if (provider === 'openclaude') {
@@ -314,7 +430,7 @@ export class RunManager extends EventEmitter {
     const isCodex = options.provider === 'codex'
     const isOpenClaude = options.provider === 'openclaude'
     const configuredOpenClaude = options.openRouter?.openClaudePath?.trim()
-    const binary = isCodex ? this.codexBinary : isOpenClaude ? (configuredOpenClaude || this.openClaudeBinary) : this.claudeBinary
+    const binary = isCodex ? this.codexBinary : isOpenClaude ? this._resolveOpenClaudeBinary(configuredOpenClaude) : this.claudeBinary
 
     let cwd = options.projectPath === '~' ? homedir() : options.projectPath
     const hasExplicitPath = typeof options.projectPath === 'string' && options.projectPath.trim() !== '' && options.projectPath !== '~'
@@ -426,7 +542,15 @@ export class RunManager extends EventEmitter {
       log(`Starting run ${requestId} [${isCodex ? 'codex' : isOpenClaude ? 'openclaude' : 'claude'}]`)
     }
 
-    const child = spawn(binary, args, {
+    const isWindowsCmdScript = process.platform === 'win32' && /\.(cmd|bat)$/i.test(binary)
+    const openClaudeNodeScript = isOpenClaude ? this._resolveOpenClaudeNodeScript(binary) : null
+    const windowsNodeBinary = openClaudeNodeScript
+      ? (this._resolveWindowsCommand('node.exe') || this._resolveWindowsCommand('node') || 'node')
+      : null
+    const spawnBinary = openClaudeNodeScript ? windowsNodeBinary! : isWindowsCmdScript ? 'cmd.exe' : binary
+    const spawnArgs = openClaudeNodeScript ? [openClaudeNodeScript, ...args] : isWindowsCmdScript ? ['/c', binary, ...args] : args
+
+    const child = spawn(spawnBinary, spawnArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd,
       env: this._getEnv(options.provider, options),

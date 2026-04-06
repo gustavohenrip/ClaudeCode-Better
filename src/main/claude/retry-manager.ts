@@ -22,13 +22,13 @@ const INITIAL_RETRY_DELAY_S = 0.5
 const MAX_RETRY_DELAY_S = 8
 
 const RATE_LIMIT_PATTERNS = [
-  '429', 'rate.?limit', 'rate_limit', 'ratelimit', 'too many request',
+  '\\b429\\b', 'rate.?limit', 'rate_limit', 'ratelimit', 'too many request',
   'throttl', 'ResourceExhausted', 'RESOURCE_EXHAUSTED', 'overloaded',
   'usage_limit', 'usage limit', 'quota', 'quota exceeded',
 ]
 
 const SERVER_ERROR_PATTERNS = [
-  '500', '502', '503', '504', 'internal server error', 'bad gateway',
+  '\\b500\\b', '\\b502\\b', '\\b503\\b', '\\b504\\b', 'internal server error', 'bad gateway',
   'service unavailable', 'gateway timeout', '500 status', '502 status',
   '503 status', '504 status',
 ]

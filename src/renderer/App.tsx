@@ -206,9 +206,13 @@ export default function App() {
   useEffect(() => {
     if (!window.clui?.setIgnoreMouseEvents) return
     let lastIgnored: boolean | null = null
+    let rafId = 0
+    let latestX = 0
+    let latestY = 0
 
-    const onMouseMove = (e: MouseEvent) => {
-      const el = document.elementFromPoint(e.clientX, e.clientY)
+    const applyMousePolicy = () => {
+      rafId = 0
+      const el = document.elementFromPoint(latestX, latestY)
       const isUI = !!(el && el.closest('[data-clui-ui]'))
       const shouldIgnore = !isUI
       if (shouldIgnore !== lastIgnored) {
@@ -221,6 +225,12 @@ export default function App() {
       }
     }
 
+    const onMouseMove = (e: MouseEvent) => {
+      latestX = e.clientX
+      latestY = e.clientY
+      if (!rafId) rafId = requestAnimationFrame(applyMousePolicy)
+    }
+
     const onMouseLeave = () => {
       if (lastIgnored !== true) {
         lastIgnored = true
@@ -228,9 +238,10 @@ export default function App() {
       }
     }
 
-    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mousemove', onMouseMove, { passive: true })
     document.addEventListener('mouseleave', onMouseLeave)
     return () => {
+      if (rafId) cancelAnimationFrame(rafId)
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseleave', onMouseLeave)
     }
