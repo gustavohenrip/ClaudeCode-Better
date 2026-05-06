@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { Question, ArrowUpRight, PencilSimple } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
@@ -13,14 +13,21 @@ interface Props {
 
 export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props) {
   const respondUserQuestion = useSessionStore((s) => s.respondUserQuestion)
-  const sendMessage = useSessionStore((s) => s.sendMessage)
   const colors = useColors()
   const [responded, setResponded] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [showOther, setShowOther] = useState(!question.options.length)
+  const [showOther, setShowOther] = useState(!question.options.length && question.allowOtherText)
   const [otherText, setOtherText] = useState('')
 
   const [sending, setSending] = useState(false)
+
+  useEffect(() => {
+    setResponded(false)
+    setSelectedIds([])
+    setShowOther(!question.options.length && question.allowOtherText)
+    setOtherText('')
+    setSending(false)
+  }, [question.questionId, question.options.length, question.allowOtherText])
 
   const toggleOption = useCallback((optionId: string) => {
     if (responded || sending) return
@@ -33,34 +40,29 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
     }
   }, [question.multiSelect, responded, sending])
 
+  const selectedLabels = selectedIds.flatMap((id) => {
+    if (id === '__custom__' || id === '__other__') return []
+    const option = question.options.find((o) => o.id === id)
+    return option ? [option.label] : []
+  })
+  const trimmedOtherText = otherText.trim()
+  const responseText = [...selectedLabels, ...(trimmedOtherText ? [trimmedOtherText] : [])].join(', ').trim()
+
   const handleConfirm = useCallback(async () => {
     if (responded || sending) return
-    const hasSelection = selectedIds.length > 0
-    const hasText = otherText.trim().length > 0
-    if (!hasSelection && !hasText) return
+    if (!responseText) return
 
     setResponded(true)
     setSending(true)
 
-    let responseText = ''
-    if (!question.multiSelect && selectedIds.length > 0) {
-      const chosenOption = question.options.find((o) => o.id === selectedIds[0])
-      responseText = otherText.trim() || chosenOption?.label || selectedIds[0]
-    } else if (question.multiSelect) {
-      const labels = selectedIds
-        .map((id) => question.options.find((o) => o.id === id)?.label || id)
-        .filter(Boolean)
-      const parts = [...labels]
-      if (otherText.trim()) parts.push(otherText.trim())
-      responseText = parts.join(', ')
-    } else if (otherText.trim()) {
-      responseText = otherText.trim()
+    const success = await respondUserQuestion(tabId, question.questionId, selectedIds, trimmedOtherText || undefined, responseText)
+    if (!success) {
+      setResponded(false)
+      setSending(false)
     }
+  }, [responded, sending, responseText, respondUserQuestion, tabId, question.questionId, selectedIds, trimmedOtherText])
 
-    respondUserQuestion(tabId, question.questionId, selectedIds, otherText.trim() || undefined)
-  }, [responded, sending, selectedIds, otherText, question, tabId, respondUserQuestion])
-
-  const canConfirm = selectedIds.length > 0 || otherText.trim().length > 0
+  const canConfirm = responseText.length > 0
 
   return (
     <motion.div
@@ -109,6 +111,7 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
                     onClick={() => {
                       if (isOther) {
                         setShowOther(true)
+                        if (!question.multiSelect) setSelectedIds([opt.id])
                       } else {
                         toggleOption(opt.id)
                       }
@@ -179,7 +182,7 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
             <button
               onClick={() => {
                 setShowOther(true)
-                setSelectedIds([question.options.length > 0 ? question.options[0].id : '__custom__'])
+                if (!question.multiSelect) setSelectedIds(['__custom__'])
               }}
               disabled={responded || sending}
               className="text-[10px] px-2 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-40"

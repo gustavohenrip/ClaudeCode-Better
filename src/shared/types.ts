@@ -214,6 +214,8 @@ export interface Message {
   role: 'user' | 'assistant' | 'tool' | 'system' | 'thinking'
   content: string
   toolName?: string
+  toolId?: string
+  toolIndex?: number
   toolInput?: string
   toolStatus?: 'running' | 'completed' | 'error'
   timestamp: number
@@ -235,8 +237,8 @@ export type NormalizedEvent =
   | { type: 'text_chunk'; text: string }
   | { type: 'thinking_chunk'; thinking: string }
   | { type: 'tool_call'; toolName: string; toolId: string; index: number }
-  | { type: 'tool_call_update'; toolId: string; partialInput: string }
-  | { type: 'tool_call_complete'; index: number }
+  | { type: 'tool_call_update'; toolId: string; partialInput: string; index?: number }
+  | { type: 'tool_call_complete'; index: number; toolId?: string }
   | { type: 'task_update'; message: AssistantMessagePayload }
   | { type: 'task_complete'; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }
   | { type: 'error'; message: string; isError: boolean; sessionId?: string }

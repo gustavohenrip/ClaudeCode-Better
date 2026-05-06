@@ -23,7 +23,7 @@ export interface CluiAPI {
   transcribeAudio(audioBase64: string): Promise<{ error: string | null; transcript: string | null }>
   getDiagnostics(): Promise<any>
   respondPermission(tabId: string, questionId: string, optionId: string): Promise<boolean>
-  respondUserQuestion(payload: { tabId: string; questionId: string; selectedIds: string[]; otherText?: string }): Promise<void>
+  respondUserQuestion(payload: { tabId: string; questionId: string; selectedIds: string[]; otherText?: string; answerText: string }): Promise<boolean>
   initSession(tabId: string, systemPrompt?: string): void
   resetTabSession(tabId: string): void
   listSessions(projectPath?: string, provider?: string): Promise<SessionMeta[]>

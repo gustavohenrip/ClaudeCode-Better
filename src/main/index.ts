@@ -844,18 +844,15 @@ ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }:
   return controlPlane.respondToPermission(tabId, questionId, optionId)
 })
 
-ipcMain.handle(IPC.RESPOND_USER_QUESTION, (_event, { tabId, questionId, selectedIds, otherText }: { tabId: string; questionId: string; selectedIds: string[]; otherText?: string }) => {
-  log(`IPC RESPOND_USER_QUESTION: tab=${tabId} question=${questionId} selections=${selectedIds.length} other=${!!otherText}`)
-  const parts: string[] = []
-  for (const selId of selectedIds) {
-    if (selId === '__custom__' || selId.startsWith('opt-')) continue
-    parts.push(selId)
-  }
-  if (otherText?.trim()) parts.push(otherText.trim())
-  const answer = parts.length > 0 ? parts.join(', ') : (otherText?.trim() || '')
-  if (answer) {
-    controlPlane.respondToUserQuestion(tabId, answer)
-  }
+ipcMain.handle(IPC.RESPOND_USER_QUESTION, (_event, payload: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string } | null | undefined) => {
+  const data: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string } = payload && typeof payload === 'object' ? payload : {}
+  const tabId = typeof data.tabId === 'string' ? data.tabId : ''
+  const questionId = typeof data.questionId === 'string' ? data.questionId : ''
+  const selectedIds = Array.isArray(data.selectedIds) ? data.selectedIds : []
+  const answer = typeof data.answerText === 'string' ? data.answerText.trim() : ''
+  log(`IPC RESPOND_USER_QUESTION: tab=${tabId} question=${questionId} selections=${selectedIds.length} answer=${!!answer}`)
+  if (!tabId || !questionId || !answer) return false
+  return controlPlane.respondToUserQuestion(tabId, answer)
 })
 
 function extractCodexUserMessage(title: string, firstMsg: string): string {

@@ -1023,13 +1023,6 @@ export class ControlPlane extends EventEmitter {
   respondToUserQuestion(tabId: string, answer: string): boolean {
     const tab = this.tabs.get(tabId)
     if (!tab?.activeRequestId) return false
-    const userMsg = JSON.stringify({
-      type: 'user',
-      message: {
-        role: 'user',
-        content: [{ type: 'text', text: answer }],
-      },
-    })
     return this.runManager.writeToStdin(tab.activeRequestId, {
       type: 'user',
       message: {

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -198,7 +198,7 @@ export function InputBar() {
         const model = tab?.sessionModel || null
         const version = tab?.sessionVersion || staticInfo?.version || null
         const current = tab?.provider === 'codex'
-          ? (preferredCodexModel || model || CODEX_MODELS[2].id)
+          ? (preferredCodexModel || model || DEFAULT_CODEX_MODEL_ID)
           : (preferredModel || model || 'default')
         const hasPreferred = tab?.provider === 'codex' ? !!preferredCodexModel : !!preferredModel
         const lines = models.map((m) => {

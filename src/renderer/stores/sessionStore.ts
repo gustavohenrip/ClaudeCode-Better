@@ -13,15 +13,15 @@ export const AVAILABLE_MODELS = [
 ] as const
 
 export const CODEX_MODELS = [
-  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
   { id: 'gpt-5.4', label: 'GPT-5.4' },
   { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex' },
-  { id: 'gpt-5.1-codex-max', label: 'GPT-5.1 Codex Max' },
-  { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
-  { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
-  { id: 'gpt-5-codex-mini', label: 'GPT-5 Codex Mini' },
+  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
+  { id: 'gpt-5.2', label: 'GPT-5.2' },
 ] as const
+
+export const DEFAULT_CODEX_MODEL_ID = CODEX_MODELS[0].id
 
 export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -145,7 +145,7 @@ interface State {
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
-  respondUserQuestion: (tabId: string, questionId: string, selectedIds: string[], otherText?: string) => void
+  respondUserQuestion: (tabId: string, questionId: string, selectedIds: string[], otherText: string | undefined, answerText: string) => Promise<boolean>
   addDirectory: (dir: string) => void
   removeDirectory: (dir: string) => void
   setBaseDirectory: (dir: string) => void
@@ -160,6 +160,148 @@ interface State {
 
 let msgCounter = 0
 const nextMsgId = () => `msg-${++msgCounter}`
+
+function tryParseJson(input: string): unknown | null {
+  try {
+    return JSON.parse(input)
+  } catch {
+    return null
+  }
+}
+
+function parseCompletedToolInput(input: string): unknown | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  const direct = tryParseJson(trimmed)
+  if (direct !== null) return direct
+  const start = trimmed.search(/[\[{]/)
+  if (start === -1) return null
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+  for (let i = start; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === '\\') {
+        escaped = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+    } else if (ch === '{') {
+      stack.push('}')
+    } else if (ch === '[') {
+      stack.push(']')
+    } else if (ch === '}' || ch === ']') {
+      if (stack.pop() !== ch) return null
+      if (stack.length === 0) return tryParseJson(trimmed.slice(start, i + 1))
+    }
+  }
+  return null
+}
+
+function toQuestionOptions(raw: unknown): AskUserQuestionPayload['options'] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Map<string, number>()
+  const makeId = (value: unknown) => {
+    const baseId = String(value)
+    const count = seen.get(baseId) || 0
+    seen.set(baseId, count + 1)
+    return count === 0 ? baseId : `${baseId}-${count}`
+  }
+  return raw.flatMap((option, index) => {
+    if (typeof option === 'string') {
+      const label = option.trim()
+      return label ? [{ id: makeId(`opt-${index}`), label }] : []
+    }
+    if (!option || typeof option !== 'object') return []
+    const source = option as Record<string, unknown>
+    const idValue = source.id ?? source.value ?? `opt-${index}`
+    const labelValue = source.label ?? source.text ?? source.title ?? source.value ?? idValue
+    const label = String(labelValue).trim()
+    if (!label) return []
+    const description = typeof source.description === 'string' ? source.description : undefined
+    return [{ id: makeId(idValue), label, description }]
+  })
+}
+
+function boolFromQuestion(raw: Record<string, unknown>, keys: string[], fallback: boolean): boolean {
+  for (const key of keys) {
+    if (typeof raw[key] === 'boolean') return raw[key]
+  }
+  return fallback
+}
+
+function toAskUserQuestions(parsed: unknown, tool: Message): AskUserQuestionPayload[] {
+  const source = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null
+  const rawQuestions = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(source?.questions)
+      ? source.questions
+      : source
+        ? [source]
+        : []
+  const baseId = tool.toolId || tool.id
+  return rawQuestions.flatMap((raw, index) => {
+    if (!raw || typeof raw !== 'object') return []
+    const q = raw as Record<string, unknown>
+    const questionValue = q.question ?? q.prompt ?? q.text ?? q.message
+    if (typeof questionValue !== 'string' || !questionValue.trim()) return []
+    const header = typeof q.header === 'string'
+      ? q.header
+      : typeof q.title === 'string'
+        ? q.title
+        : undefined
+    return [{
+      questionId: `${baseId}-${index}`,
+      question: questionValue.trim(),
+      header,
+      options: toQuestionOptions(q.options),
+      multiSelect: boolFromQuestion(q, ['multiSelect', 'multi_select', 'multiple', 'multipleSelect'], false),
+      allowOtherText: boolFromQuestion(q, ['allowOtherText', 'allow_other_text', 'allowCustom'], true),
+    }]
+  })
+}
+
+function appendAskUserQuestions(existing: AskUserQuestionPayload[], incoming: AskUserQuestionPayload[]): AskUserQuestionPayload[] {
+  if (incoming.length === 0) return existing
+  const seen = new Set(existing.map((q) => q.questionId))
+  const next = incoming.filter((q) => {
+    if (seen.has(q.questionId)) return false
+    seen.add(q.questionId)
+    return true
+  })
+  return next.length > 0 ? [...existing, ...next] : existing
+}
+
+function isAskUserQuestionName(name?: string): boolean {
+  return (name || '').split(':').pop()!.replace(/[_-]/g, '').toLowerCase() === 'askuserquestion'
+}
+
+function findRunningToolIndex(messages: Message[], toolId?: string, toolIndex?: number): number {
+  if (toolId) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'tool' && m.toolStatus === 'running' && m.toolId === toolId) return i
+    }
+  }
+  if (typeof toolIndex === 'number') {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'tool' && m.toolStatus === 'running' && m.toolIndex === toolIndex) return i
+    }
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'tool' && m.toolStatus === 'running') return i
+  }
+  return -1
+}
 
 let _audioCtx: AudioContext | null = null
 let _audioBuffer: AudioBuffer | null = null
@@ -626,25 +768,28 @@ export const useSessionStore = create<State>((set, get) => ({
 
   // ─── Ask User Question response ───
 
-  respondUserQuestion: (tabId, questionId, selectedIds, otherText) => {
-    const payload = { tabId, questionId, selectedIds, otherText }
-    window.clui.respondUserQuestion(payload)
-      .then(() => {
-        set((s) => ({
-          tabs: s.tabs.map((t) => {
-            if (t.id !== tabId) return t
-            const remaining = t.askUserQuestions.filter((q) => q.questionId !== questionId)
-            return {
-              ...t,
-              askUserQuestions: remaining,
-              currentActivity: remaining.length > 0
-                ? `Waiting for response...`
-                : 'Working...',
-            }
-          }),
-        }))
-      })
-      .catch(() => {})
+  respondUserQuestion: async (tabId, questionId, selectedIds, otherText, answerText) => {
+    const payload = { tabId, questionId, selectedIds, otherText, answerText }
+    try {
+      const success = await window.clui.respondUserQuestion(payload)
+      if (!success) return false
+      set((s) => ({
+        tabs: s.tabs.map((t) => {
+          if (t.id !== tabId) return t
+          const remaining = t.askUserQuestions.filter((q) => q.questionId !== questionId)
+          return {
+            ...t,
+            askUserQuestions: remaining,
+            currentActivity: remaining.length > 0
+              ? `Waiting for response...`
+              : 'Working...',
+          }
+        }),
+      }))
+      return true
+    } catch {
+      return false
+    }
   },
 
   // ─── Directory management ───
@@ -785,6 +930,9 @@ export const useSessionStore = create<State>((set, get) => ({
             title,
             attachments: [],
             queuedPrompts: [],
+            permissionQueue: [],
+            permissionDenied: null,
+            askUserQuestions: [],
             messages: [
               ...withEffectiveBase.messages,
               { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now(), attachments: t.attachments.length > 0 ? [...t.attachments] : undefined },
@@ -905,6 +1053,8 @@ export const useSessionStore = create<State>((set, get) => ({
                 role: 'tool',
                 content: '',
                 toolName: event.toolName,
+                toolId: event.toolId,
+                toolIndex: event.index,
                 toolInput: '',
                 toolStatus: 'running',
                 timestamp: Date.now(),
@@ -914,9 +1064,10 @@ export const useSessionStore = create<State>((set, get) => ({
 
           case 'tool_call_update': {
             const msgs = [...updated.messages]
-            const lastTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (lastTool) {
-              lastTool.toolInput = (lastTool.toolInput || '') + event.partialInput
+            const toolIdx = findRunningToolIndex(msgs, event.toolId, event.index)
+            if (toolIdx !== -1) {
+              const tool = msgs[toolIdx]
+              msgs[toolIdx] = { ...tool, toolInput: (tool.toolInput || '') + event.partialInput }
             }
             updated.messages = msgs
             break
@@ -924,53 +1075,17 @@ export const useSessionStore = create<State>((set, get) => ({
 
           case 'tool_call_complete': {
             const msgs2 = [...updated.messages]
-            const runningTool = [...msgs2].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (runningTool) {
-              if (runningTool.toolName === 'AskUserQuestion' && runningTool.toolInput) {
-                try {
-                  let inputStr = runningTool.toolInput
-                  const lastBrace = inputStr.lastIndexOf('}')
-                  if (lastBrace !== -1) {
-                    inputStr = inputStr.substring(0, lastBrace + 1)
-                  }
-                  const parsed = JSON.parse(inputStr)
-                  const questions = Array.isArray(parsed.questions) ? parsed.questions : []
-
-                  let hasQuestions = false
-                  for (const q of questions) {
-                    const qId = runningTool.id ? `${runningTool.id}-${q.header || 'unknown'}` : `q-${Date.now()}`
-                    if (q.question) {
-                      hasQuestions = true
-                      const opts = Array.isArray(q.options)
-                        ? q.options.map((o: { label: string; description?: string }, i: number) => ({
-                            id: `opt-${i}`,
-                            label: o.label || `Option ${i + 1}`,
-                            description: o.description,
-                          }))
-                        : []
-                      updated.askUserQuestions = [
-                        ...updated.askUserQuestions,
-                        {
-                          questionId: qId,
-                          question: q.question,
-                          header: q.header || undefined,
-                          options: opts,
-                          multiSelect: !!q.multiSelect,
-                          allowOtherText: true,
-                        },
-                      ]
-                    }
-                  }
-                  if (hasQuestions) {
-                    updated.currentActivity = 'Waiting for response...'
-                  } else {
-                    runningTool.toolStatus = 'completed'
-                  }
-                } catch {
-                  runningTool.toolStatus = 'completed'
+            const toolIdx = findRunningToolIndex(msgs2, event.toolId, event.index)
+            if (toolIdx !== -1) {
+              const runningTool = msgs2[toolIdx]
+              msgs2[toolIdx] = { ...runningTool, toolStatus: 'completed' }
+              if (isAskUserQuestionName(runningTool.toolName) && runningTool.toolInput) {
+                const parsed = parseCompletedToolInput(runningTool.toolInput)
+                const questions = parsed ? toAskUserQuestions(parsed, runningTool) : []
+                if (questions.length > 0) {
+                  updated.askUserQuestions = appendAskUserQuestions(updated.askUserQuestions, questions)
+                  updated.currentActivity = 'Waiting for response...'
                 }
-              } else {
-                runningTool.toolStatus = 'completed'
               }
             }
             updated.messages = msgs2
@@ -1003,10 +1118,14 @@ export const useSessionStore = create<State>((set, get) => ({
               }
 
               // ── Tool card deduplication (unchanged) ──
-              for (const block of event.message.content) {
+              for (const [blockIndex, block] of event.message.content.entries()) {
                 if (block.type === 'tool_use' && block.name) {
                   const exists = updated.messages.find(
-                    (m) => m.role === 'tool' && m.toolName === block.name && !m.content
+                    (m) => m.role === 'tool' && (
+                      block.id
+                        ? m.toolId === block.id
+                        : m.toolName === block.name && !m.content
+                    )
                   )
                   if (!exists) {
                     updated.messages = [
@@ -1016,6 +1135,8 @@ export const useSessionStore = create<State>((set, get) => ({
                         role: 'tool',
                         content: '',
                         toolName: block.name,
+                        toolId: block.id,
+                        toolIndex: blockIndex,
                         toolInput: JSON.stringify(block.input, null, 2),
                         toolStatus: 'completed',
                         timestamp: Date.now(),
@@ -1033,6 +1154,7 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.activeRequestId = null
             updated.currentActivity = ''
             updated.permissionQueue = []
+            updated.askUserQuestions = []
             updated.lastResult = {
               totalCostUsd: event.costUsd,
               durationMs: event.durationMs,
@@ -1090,6 +1212,7 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.activeRequestId = null
             updated.currentActivity = ''
             updated.permissionQueue = []
+            updated.askUserQuestions = []
             updated.permissionDenied = null
             updated.messages = [
               ...updated.messages,
@@ -1102,6 +1225,7 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.activeRequestId = null
             updated.currentActivity = ''
             updated.permissionQueue = []
+            updated.askUserQuestions = []
             updated.permissionDenied = null
             updated.messages = [
               ...updated.messages,
@@ -1142,9 +1266,9 @@ export const useSessionStore = create<State>((set, get) => ({
                 description: o.description,
               })),
               multiSelect: event.multiSelect,
-              allowOtherText: event.allowOtherText ?? false,
+              allowOtherText: event.allowOtherText ?? true,
             }
-            updated.askUserQuestions = [...updated.askUserQuestions, q]
+            updated.askUserQuestions = appendAskUserQuestions(updated.askUserQuestions, [q])
             updated.currentActivity = `Waiting for response...`
             break
           }
@@ -1190,7 +1314,7 @@ export const useSessionStore = create<State>((set, get) => ({
           ? {
               ...t,
               status: newStatus as TabStatus,
-              ...(newStatus === 'idle' ? { currentActivity: '', permissionQueue: [] as import('../../shared/types').PermissionRequest[], permissionDenied: null } : {}),
+              ...(newStatus === 'idle' ? { currentActivity: '', permissionQueue: [] as import('../../shared/types').PermissionRequest[], askUserQuestions: [] as AskUserQuestionPayload[], permissionDenied: null } : {}),
             }
           : t
       ),

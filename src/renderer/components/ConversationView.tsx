@@ -221,6 +221,7 @@ export function ConversationView() {
         <AnimatePresence>
           {tab.askUserQuestions.length > 0 && (
             <AskUserQuestionCard
+              key={tab.askUserQuestions[0].questionId}
               tabId={tab.id}
               question={tab.askUserQuestions[0]}
               queueLength={tab.askUserQuestions.length}

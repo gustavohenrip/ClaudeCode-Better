@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database, WarningCircle, ArrowCounterClockwise } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
 import { useCodexQuota } from '../hooks/useCodexQuota'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -128,7 +128,7 @@ function ModelPicker() {
         const m = CODEX_MODELS.find((m) => m.id === tab.sessionModel)
         return m?.label || tab.sessionModel
       }
-      return CODEX_MODELS[2].label
+      return CODEX_MODELS.find((m) => m.id === DEFAULT_CODEX_MODEL_ID)?.label || DEFAULT_CODEX_MODEL_ID
     }
     if (preferredClaudeModel) {
       const m = AVAILABLE_MODELS.find((m) => m.id === preferredClaudeModel)
@@ -181,7 +181,7 @@ function ModelPicker() {
         >
           <div className="py-1" style={{ maxHeight: 240, overflowY: 'auto' }}>
             {models.map((m) => {
-              const defaultId = isCodex ? CODEX_MODELS[2].id : AVAILABLE_MODELS[0].id
+              const defaultId = isCodex ? DEFAULT_CODEX_MODEL_ID : AVAILABLE_MODELS[0].id
               const isSelected = preferredModel === m.id || (!preferredModel && m.id === defaultId)
               return (
                 <button

@@ -85,6 +85,7 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
           type: 'tool_call_update',
           toolId: '',
           partialInput: delta.partial_json,
+          index: sub.index,
         }]
       }
       if (delta.type === 'thinking_delta') {
@@ -181,6 +182,87 @@ function normalizePermission(event: PermissionEvent): NormalizedEvent[] {
       kind: o.kind,
     })),
   }]
+}
+
+function getCodexToolName(item: any): string {
+  return item.tool || item.name || item.tool_name || item.function?.name || 'unknown'
+}
+
+function isAskUserQuestionTool(item: any): boolean {
+  const name = getCodexToolName(item).split(':').pop() || ''
+  return name.replace(/[_-]/g, '').toLowerCase() === 'askuserquestion'
+}
+
+function parseJsonLike(value: any): any {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+function normalizeAskUserQuestionOptions(raw: any): Array<{ id: string; label: string; description?: string }> {
+  if (!Array.isArray(raw)) return []
+  const seen = new Map<string, number>()
+  const makeId = (value: unknown) => {
+    const baseId = String(value)
+    const count = seen.get(baseId) || 0
+    seen.set(baseId, count + 1)
+    return count === 0 ? baseId : `${baseId}-${count}`
+  }
+  return raw
+    .map((option, index) => {
+      if (typeof option === 'string') {
+        const label = option.trim()
+        return label ? { id: makeId(`opt-${index}`), label } : null
+      }
+      if (!option || typeof option !== 'object') return null
+      const idValue = option.id ?? option.value ?? `opt-${index}`
+      const labelValue = option.label ?? option.text ?? option.title ?? option.value ?? idValue
+      const label = String(labelValue).trim()
+      if (!label) return null
+      const description = typeof option.description === 'string' ? option.description : undefined
+      return { id: makeId(idValue), label, description }
+    })
+    .filter((option): option is { id: string; label: string; description?: string } => !!option)
+}
+
+function normalizeAskUserQuestionPayload(input: any, toolId: string): NormalizedEvent[] {
+  const parsed = parseJsonLike(input)
+  if (!parsed) return []
+  const rawQuestions = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed.questions)
+      ? parsed.questions
+      : [parsed]
+
+  return rawQuestions.flatMap((question: any, index: number) => {
+    if (!question || typeof question !== 'object') return []
+    const questionText = question.question ?? question.prompt ?? question.text ?? question.message
+    if (typeof questionText !== 'string' || !questionText.trim()) return []
+    const header = typeof question.header === 'string'
+      ? question.header
+      : typeof question.title === 'string'
+        ? question.title
+        : undefined
+    const allowOtherText = typeof question.allowOtherText === 'boolean'
+      ? question.allowOtherText
+      : typeof question.allow_other_text === 'boolean'
+        ? question.allow_other_text
+        : typeof question.allowCustom === 'boolean'
+          ? question.allowCustom
+          : true
+    return [{
+      type: 'ask_user_question',
+      questionId: `${toolId || 'codex-question'}-${index}`,
+      question: questionText.trim(),
+      header,
+      options: normalizeAskUserQuestionOptions(question.options),
+      multiSelect: !!(question.multiSelect ?? question.multi_select ?? question.multiple ?? question.multipleSelect),
+      allowOtherText,
+    }]
+  })
 }
 
 export function normalizeCodex(raw: any): NormalizedEvent[] {
@@ -356,7 +438,8 @@ function normalizeCodexItemStarted(item: any): NormalizedEvent[] {
     }
 
     case 'mcp_tool_call':
-      return [{ type: 'tool_call', toolName: `${item.server || 'mcp'}:${item.tool || 'unknown'}`, toolId: item.id || '', index: 0 }]
+      if (isAskUserQuestionTool(item)) return normalizeAskUserQuestionPayload(item.arguments ?? item.input ?? item.params, item.id || '')
+      return [{ type: 'tool_call', toolName: `${item.server || 'mcp'}:${getCodexToolName(item)}`, toolId: item.id || '', index: 0 }]
 
     case 'web_search':
       return [{ type: 'tool_call', toolName: 'WebSearch', toolId: item.id || '', index: 0 }]
@@ -421,7 +504,7 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
       } else if (input) {
         events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: input })
       }
-      events.push({ type: 'tool_call_complete', index: 0 })
+      events.push({ type: 'tool_call_complete', index: 0, toolId: item.id || '' })
       return events
     }
 
@@ -436,11 +519,12 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
           : JSON.stringify({ file_path: first.path, old_string: '', new_string: '' })
         events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: json })
       }
-      events.push({ type: 'tool_call_complete', index: 0 })
+      events.push({ type: 'tool_call_complete', index: 0, toolId: item.id || '' })
       return events
     }
 
     case 'mcp_tool_call': {
+      if (isAskUserQuestionTool(item)) return normalizeAskUserQuestionPayload(item.arguments ?? item.input ?? item.params, item.id || '')
       const events: NormalizedEvent[] = []
       if (item.arguments) {
         events.push({
@@ -449,7 +533,7 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
           partialInput: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments, null, 2),
         })
       }
-      events.push({ type: 'tool_call_complete', index: 0 })
+      events.push({ type: 'tool_call_complete', index: 0, toolId: item.id || '' })
       return events
     }
 
@@ -458,7 +542,7 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
       if (item.query) {
         events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: item.query })
       }
-      events.push({ type: 'tool_call_complete', index: 0 })
+      events.push({ type: 'tool_call_complete', index: 0, toolId: item.id || '' })
       return events
     }
 
