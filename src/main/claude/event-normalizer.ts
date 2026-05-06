@@ -9,6 +9,7 @@ import type {
   PermissionEvent,
   ContentDelta,
 } from '../../shared/types'
+import { hasUsageData, normalizeUsageData } from '../../shared/usage'
 import { normalizeAskUserQuestionToolInput } from '../native-harness/ask-user-question'
 import { getNativeToolNames } from '../native-harness/tool-registry'
 
@@ -158,7 +159,7 @@ function normalizeResult(event: ResultEvent): NormalizedEvent[] {
     costUsd: event.total_cost_usd || 0,
     durationMs: event.duration_ms || 0,
     numTurns: event.num_turns || 0,
-    usage: event.usage || {},
+    usage: normalizeUsageData(event.usage),
     sessionId: event.session_id,
     ...(denials && denials.length > 0 ? { permissionDenials: denials } : {}),
   }]
@@ -295,21 +296,28 @@ export function normalizeCodex(raw: any): NormalizedEvent[] {
       return []
 
     case 'turn.completed': {
-      const u = evt.usage || {}
+      const usage = normalizeUsageData(evt.usage || evt.token_usage || evt.info?.last_token_usage)
       return [{
         type: 'task_complete',
         result: '',
         costUsd: 0,
         durationMs: 0,
         numTurns: 1,
-        usage: {
-          input_tokens: u.input_tokens || 0,
-          output_tokens: u.output_tokens || 0,
-          cache_read_input_tokens: u.cached_input_tokens || 0,
-        },
+        usage,
         sessionId: evt.thread_id || '',
       }]
     }
+
+    case 'task_complete':
+      return [{
+        type: 'task_complete',
+        result: evt.last_agent_message || evt.result || '',
+        costUsd: evt.total_cost_usd || 0,
+        durationMs: evt.duration_ms || 0,
+        numTurns: evt.num_turns || 1,
+        usage: normalizeUsageData(evt.usage || evt.token_usage || evt.info?.last_token_usage),
+        sessionId: evt.thread_id || evt.session_id || '',
+      }]
 
     case 'turn.failed':
       return [{
@@ -329,10 +337,50 @@ export function normalizeCodex(raw: any): NormalizedEvent[] {
     }
 
     case 'token_count': {
+      const events: NormalizedEvent[] = []
       if (evt.rate_limits) {
-        return [{
+        events.push({
           type: 'codex_rate_limits',
           rateLimits: evt.rate_limits,
+        })
+      }
+      const usage = normalizeUsageData(evt.info?.last_token_usage)
+      if (hasUsageData(usage)) {
+        events.push({
+          type: 'usage',
+          usage,
+        })
+      }
+      if (events.length > 0) {
+        return events
+      }
+      return []
+    }
+
+    case 'turn_aborted':
+      return [{
+        type: 'error',
+        message: evt.reason || 'Codex turn aborted',
+        isError: true,
+        sessionId: evt.thread_id || '',
+      }]
+
+    case 'message':
+    case 'user_message': {
+      const text = typeof evt.content === 'string'
+        ? evt.content
+        : Array.isArray(evt.content)
+          ? evt.content
+              .filter((block: any) => block?.type === 'output_text' || block?.type === 'text')
+              .map((block: any) => block.text || block.content || '')
+              .join('')
+          : ''
+      if (evt.role === 'assistant' && text) {
+        return [{
+          type: 'text_chunk',
+          text,
+          streamId: evt.id || evt.message_id,
+          appendMode: 'block',
         }]
       }
       return []
@@ -465,14 +513,14 @@ function normalizeCodexItemUpdated(item: any): NormalizedEvent[] {
       const cmd = item.command || ''
       if (isFileWrite(cmd)) return []
       if (item.aggregated_output) {
-        return [{ type: 'tool_call_update', toolId: item.id || '', partialInput: item.aggregated_output }]
+        return [{ type: 'tool_call_update', toolId: item.id || '', partialInput: item.aggregated_output, updateMode: 'replace' }]
       }
       return []
     }
 
     case 'agent_message': {
       if (item.text) {
-        return [{ type: 'text_chunk', text: item.text }]
+        return [{ type: 'text_chunk', text: item.text, streamId: item.id || item.message_id, appendMode: 'block' }]
       }
       return []
     }
@@ -486,13 +534,13 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
   switch (item.type) {
     case 'agent_message':
       if (item.text) {
-        return [{ type: 'text_chunk', text: item.text }]
+        return [{ type: 'text_chunk', text: item.text, streamId: item.id || item.message_id, appendMode: 'block' }]
       }
       return []
 
     case 'reasoning':
       if (item.text) {
-        return [{ type: 'thinking_chunk', thinking: item.text }]
+        return [{ type: 'thinking_chunk', thinking: item.text, streamId: item.id || item.message_id, insertBeforeAssistant: true }]
       }
       return []
 

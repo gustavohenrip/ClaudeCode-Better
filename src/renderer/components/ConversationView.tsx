@@ -171,7 +171,7 @@ export function ConversationView() {
       <div
         ref={scrollRef}
         className="overflow-y-auto overflow-x-hidden px-4 pt-2 conversation-selectable"
-        style={{ maxHeight: expandedUI ? 460 : 336, paddingBottom: 28 }}
+        style={{ maxHeight: expandedUI ? 460 : 336, paddingBottom: 54 }}
         onScroll={handleScroll}
       >
         {hasOlder && (
@@ -186,7 +186,7 @@ export function ConversationView() {
           </div>
         )}
 
-        <div className="space-y-1 relative">
+        <div className="space-y-2 relative">
           {grouped.map((item, idx) => {
             const msgIndex = startIndex + idx
             const isHistorical = msgIndex < historicalThreshold
@@ -276,7 +276,7 @@ export function ConversationView() {
                 <span className="w-[4px] h-[4px] rounded-full animate-bounce-dot" style={{ background: colors.statusRunning, animationDelay: '150ms' }} />
                 <span className="w-[4px] h-[4px] rounded-full animate-bounce-dot" style={{ background: colors.statusRunning, animationDelay: '300ms' }} />
               </span>
-              <span style={{ color: colors.textSecondary }}>{tab.currentActivity || 'Working...'}</span>
+              <span style={{ color: colors.textSecondary }}>{tab.currentActivity || 'Working…'}</span>
             </span>
           )}
 
@@ -551,7 +551,7 @@ function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: b
   )
 
   if (skipMotion) {
-    return <div className="flex justify-end py-1.5">{content}</div>
+    return <div className="flex justify-end py-2">{content}</div>
   }
 
   return (
@@ -559,7 +559,7 @@ function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: b
       initial={{ opacity: 0, y: 8, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
-      className="flex justify-end py-1.5"
+      className="flex justify-end py-2"
     >
       {content}
     </motion.div>
@@ -575,7 +575,7 @@ function QueuedMessage({ content }: { content: string }) {
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, scale: 0.93 }}
       transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
-      className="flex justify-end py-1.5"
+      className="flex justify-end py-2"
     >
       <div
         className="text-[13px] leading-[1.5] px-3 py-1.5 max-w-[85%]"
@@ -740,7 +740,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
   )
 
   if (skipMotion) {
-    return <div className="py-1">{inner}</div>
+    return <div className="py-2">{inner}</div>
   }
 
   return (
@@ -748,7 +748,7 @@ const AssistantMessage = React.memo(function AssistantMessage({
       initial={{ opacity: 0, y: 8, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
-      className="py-1"
+      className="py-2"
     >
       {inner}
     </motion.div>
@@ -780,7 +780,7 @@ function getToolDescription(name: string, input?: string): string {
       case 'Grep': return `Search: ${parsed.pattern || ''}`
       case 'Bash': {
         const cmd = parsed.command || ''
-        return cmd.length > 60 ? `${cmd.substring(0, 57)}...` : cmd || 'Bash'
+        return cmd.length > 60 ? `${cmd.substring(0, 57)}…` : cmd || 'Bash'
       }
       case 'WebSearch': return `Search: ${parsed.query || parsed.search_query || ''}`
       case 'WebFetch': return `Fetch: ${parsed.url || ''}`
@@ -790,7 +790,7 @@ function getToolDescription(name: string, input?: string): string {
   } catch {
     // Input is not JSON or is partial — show truncated raw
     const trimmed = input.trim()
-    if (trimmed.length > 60) return `${name}: ${trimmed.substring(0, 57)}...`
+    if (trimmed.length > 60) return `${name}: ${trimmed.substring(0, 57)}…`
     return trimmed ? `${name}: ${trimmed}` : name
   }
 }
@@ -805,7 +805,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 
   if (isOpen) {
     const inner = (
-      <div className="py-1">
+      <div className="py-2">
         {!hasRunning && (
           <div
             className="flex items-center gap-1 cursor-pointer mb-1.5"
@@ -867,7 +867,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 
                     {isRunning && (
                       <span className="text-[10px] mt-0.5 block" style={{ color: colors.textTertiary }}>
-                        running...
+                        running…
                       </span>
                     )}
 
@@ -903,24 +903,24 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 
   const inner = (
     <div
-      className="flex items-start gap-1 cursor-pointer py-[2px]"
+      className="flex items-start gap-1.5 cursor-pointer py-1.5 min-w-0"
       onClick={() => setExpanded(true)}
     >
       <CaretRight size={10} className="flex-shrink-0 mt-[2px]" style={{ color: colors.textTertiary }} />
-      <span className="text-[11px] leading-[1.4]" style={{ color: colors.textTertiary }}>
+      <span className="text-[11px] leading-[1.45] break-words min-w-0" style={{ color: colors.textTertiary }}>
         {summary}
       </span>
     </div>
   )
 
-  if (skipMotion) return <div className="py-0.5">{inner}</div>
+  if (skipMotion) return <div className="py-1">{inner}</div>
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: 'spring', stiffness: 400, damping: 28, mass: 0.5 }}
-      className="py-0.5"
+      className="py-1"
     >
       {inner}
     </motion.div>
@@ -928,7 +928,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 }
 
 function ThinkingMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const colors = useColors()
 
   const inner = (
@@ -969,14 +969,14 @@ function ThinkingMessage({ message, skipMotion }: { message: Message; skipMotion
     </div>
   )
 
-  if (skipMotion) return <div className="py-1">{inner}</div>
+  if (skipMotion) return <div className="py-2">{inner}</div>
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 6, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ type: 'spring', stiffness: 380, damping: 26, mass: 0.6 }}
-      className="py-1"
+      className="py-2"
     >
       {inner}
     </motion.div>

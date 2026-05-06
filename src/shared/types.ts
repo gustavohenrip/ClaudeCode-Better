@@ -111,6 +111,8 @@ export interface UsageData {
   output_tokens?: number
   cache_read_input_tokens?: number
   cache_creation_input_tokens?: number
+  reasoning_output_tokens?: number
+  total_tokens?: number
   service_tier?: string
 }
 
@@ -226,7 +228,7 @@ export interface TabState {
   /** Extra directories accessible via --add-dir (session-preserving) */
   additionalDirs: string[]
   /** Accumulated token usage for the current session */
-  tokenUsage: { input: number; output: number; cacheRead: number; cacheCreation: number }
+  tokenUsage: { input: number; output: number; cacheRead: number; cacheCreation: number; reasoning: number; total: number }
   /** Active retry state (null if not retrying) */
   retryStatus: { active: boolean; attempt: number; maxAttempts: number; reason: string; delayMs: number } | null
 }
@@ -240,6 +242,7 @@ export interface Message {
   toolIndex?: number
   toolInput?: string
   toolStatus?: 'running' | 'completed' | 'error'
+  streamId?: string
   timestamp: number
   attachments?: Attachment[]
 }
@@ -256,10 +259,10 @@ export interface RunResult {
 
 export type NormalizedEvent =
   | { type: 'session_init'; sessionId: string; tools: string[]; model: string; mcpServers: Array<{ name: string; status: string }>; skills: string[]; version: string; isWarmup?: boolean }
-  | { type: 'text_chunk'; text: string }
-  | { type: 'thinking_chunk'; thinking: string }
+  | { type: 'text_chunk'; text: string; appendMode?: 'stream' | 'block'; streamId?: string }
+  | { type: 'thinking_chunk'; thinking: string; streamId?: string; insertBeforeAssistant?: boolean }
   | { type: 'tool_call'; toolName: string; toolId: string; index: number }
-  | { type: 'tool_call_update'; toolId: string; partialInput: string; index?: number }
+  | { type: 'tool_call_update'; toolId: string; partialInput: string; index?: number; updateMode?: 'append' | 'replace' }
   | { type: 'tool_call_complete'; index: number; toolId?: string }
   | { type: 'task_update'; message: AssistantMessagePayload }
   | { type: 'task_complete'; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }

@@ -423,6 +423,10 @@ function formatTokenCount(n: number): string {
   return String(n)
 }
 
+function formatExactTokenCount(n: number): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(n)
+}
+
 function TokenBadge() {
   const tab = useActiveTab()
   const colors = useColors()
@@ -430,7 +434,16 @@ function TokenBadge() {
   const usage = tab?.tokenUsage
   const input = usage?.input || 0
   const output = usage?.output || 0
-  const totalTokens = input + output
+  const cacheRead = usage?.cacheRead || 0
+  const cacheCreation = usage?.cacheCreation || 0
+  const reasoning = usage?.reasoning || 0
+  const exactTotal = usage?.total || 0
+  const totalTokens = exactTotal || input + output || reasoning
+  const label = input || output
+    ? `${formatTokenCount(input)} in / ${formatTokenCount(output)} out`
+    : exactTotal
+      ? `${formatTokenCount(exactTotal)} total`
+      : `${formatTokenCount(reasoning)} reasoning`
 
   if (totalTokens === 0) {
     return (
@@ -449,10 +462,10 @@ function TokenBadge() {
     <div
       className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5"
       style={{ color: colors.textSecondary }}
-      title={`Input: ${formatTokenCount(input)} | Output: ${formatTokenCount(output)}\nCache read: ${formatTokenCount(usage?.cacheRead || 0)} | Cache write: ${formatTokenCount(usage?.cacheCreation || 0)}`}
+      title={`Input: ${formatExactTokenCount(input)} | Output: ${formatExactTokenCount(output)}\nReasoning: ${formatExactTokenCount(reasoning)} | Total: ${formatExactTokenCount(exactTotal || input + output)}\nCache read: ${formatExactTokenCount(cacheRead)} | Cache write: ${formatExactTokenCount(cacheCreation)}`}
     >
       <Database size={10} weight="regular" />
-      <span>{formatTokenCount(totalTokens)} tokens</span>
+      <span>{label}</span>
     </div>
   )
 }

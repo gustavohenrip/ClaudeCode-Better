@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { AskUserQuestionAnswer, AskUserQuestionItem, TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, Provider, OpenRouterConfig, AskUserQuestionPayload } from '../../shared/types'
+import { hasUsageData, normalizeUsageData, usageToTokenUsage } from '../../shared/usage'
 import { useThemeStore, type EffortLevel } from '../theme'
 
 const notificationSrc = new URL('../../../resources/notification.mp3', import.meta.url).href
@@ -326,6 +327,89 @@ function findRunningToolIndex(messages: Message[], toolId?: string, toolIndex?: 
   return -1
 }
 
+function findLastUserIndex(messages: Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') return i
+  }
+  return -1
+}
+
+function findLastAssistantIndex(messages: Message[], streamId?: string): number {
+  const lastUserIdx = findLastUserIndex(messages)
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const m = messages[i]
+    if (m.role !== 'assistant' || m.toolName) continue
+    if (streamId && m.streamId !== streamId) continue
+    if (!streamId && m.streamId) continue
+    return i
+  }
+  return -1
+}
+
+function findFirstAssistantIndex(messages: Message[]): number {
+  const lastUserIdx = findLastUserIndex(messages)
+  for (let i = lastUserIdx + 1; i < messages.length; i++) {
+    const m = messages[i]
+    if (m.role === 'assistant' && !m.toolName) return i
+  }
+  return -1
+}
+
+function findLastThinkingIndex(messages: Message[], streamId?: string): number {
+  const lastUserIdx = findLastUserIndex(messages)
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const m = messages[i]
+    if (m.role !== 'thinking') continue
+    if (streamId && m.streamId !== streamId) continue
+    if (!streamId && m.streamId) continue
+    return i
+  }
+  return -1
+}
+
+function appendTextChunk(messages: Message[], text: string, streamId?: string, appendMode: 'stream' | 'block' = 'stream'): Message[] {
+  const content = appendMode === 'block' && text.trim() ? text.trim() : text
+  if (!content) return messages
+  const existingIdx = findLastAssistantIndex(messages, streamId)
+  if (existingIdx !== -1 && appendMode === 'stream') {
+    const target = messages[existingIdx]
+    return [
+      ...messages.slice(0, existingIdx),
+      { ...target, content: target.content + content },
+      ...messages.slice(existingIdx + 1),
+    ]
+  }
+  return [
+    ...messages,
+    { id: nextMsgId(), role: 'assistant' as const, content, streamId, timestamp: Date.now() },
+  ]
+}
+
+function appendThinkingChunk(messages: Message[], thinking: string, streamId?: string, insertBeforeAssistant?: boolean): Message[] {
+  if (!thinking) return messages
+  const existingIdx = findLastThinkingIndex(messages, streamId)
+  if (existingIdx !== -1) {
+    const target = messages[existingIdx]
+    return [
+      ...messages.slice(0, existingIdx),
+      { ...target, content: target.content + thinking },
+      ...messages.slice(existingIdx + 1),
+    ]
+  }
+  const message: Message = { id: nextMsgId(), role: 'thinking', content: thinking, streamId, timestamp: Date.now() }
+  if (insertBeforeAssistant) {
+    const assistantIdx = findFirstAssistantIndex(messages)
+    if (assistantIdx !== -1) {
+      return [
+        ...messages.slice(0, assistantIdx),
+        message,
+        ...messages.slice(assistantIdx),
+      ]
+    }
+  }
+  return [...messages, message]
+}
+
 let _audioCtx: AudioContext | null = null
 let _audioBuffer: AudioBuffer | null = null
 let _audioInitPromise: Promise<void> | null = null
@@ -400,6 +484,10 @@ function sendTaskNotification(tabId: string, tab: { title: string; workingDirect
   try { window.clui.notifyNative({ title, body }) } catch {}
 }
 
+function emptyTokenUsage(): TabState['tokenUsage'] {
+  return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, reasoning: 0, total: 0 }
+}
+
 function makeLocalTab(provider: Provider = 'claude'): TabState {
   return {
     id: crypto.randomUUID(),
@@ -425,7 +513,7 @@ function makeLocalTab(provider: Provider = 'claude'): TabState {
     workingDirectory: '~',
     hasChosenDirectory: false,
     additionalDirs: [],
-    tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    tokenUsage: emptyTokenUsage(),
     retryStatus: null,
   }
 }
@@ -704,7 +792,7 @@ export const useSessionStore = create<State>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
-          ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, askUserQuestions: [], queuedPrompts: [] }
+          ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, askUserQuestions: [], queuedPrompts: [], tokenUsage: emptyTokenUsage() }
           : t
       ),
     }))
@@ -856,7 +944,7 @@ export const useSessionStore = create<State>((set, get) => ({
               hasChosenDirectory: true,
               claudeSessionId: null,
               additionalDirs: [],
-              tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+              tokenUsage: emptyTokenUsage(),
             }
           : t
       ),
@@ -1035,35 +1123,15 @@ export const useSessionStore = create<State>((set, get) => ({
             break
 
           case 'thinking_chunk': {
-            const lastThink = updated.messages[updated.messages.length - 1]
-            if (lastThink?.role === 'thinking') {
-              updated.messages = [
-                ...updated.messages.slice(0, -1),
-                { ...lastThink, content: lastThink.content + event.thinking },
-              ]
-            } else {
-              updated.messages = [
-                ...updated.messages,
-                { id: nextMsgId(), role: 'thinking', content: event.thinking, timestamp: Date.now() },
-              ]
-            }
+            if (updated.status === 'completed') break
+            updated.messages = appendThinkingChunk(updated.messages, event.thinking, event.streamId, event.insertBeforeAssistant)
             break
           }
 
           case 'text_chunk': {
+            if (updated.status === 'completed') break
             updated.currentActivity = 'Writing...'
-            const lastMsg = updated.messages[updated.messages.length - 1]
-            if (lastMsg?.role === 'assistant' && !lastMsg.toolName) {
-              updated.messages = [
-                ...updated.messages.slice(0, -1),
-                { ...lastMsg, content: lastMsg.content + event.text },
-              ]
-            } else {
-              updated.messages = [
-                ...updated.messages,
-                { id: nextMsgId(), role: 'assistant', content: event.text, timestamp: Date.now() },
-              ]
-            }
+            updated.messages = appendTextChunk(updated.messages, event.text, event.streamId, event.appendMode)
             break
           }
 
@@ -1090,7 +1158,10 @@ export const useSessionStore = create<State>((set, get) => ({
             const toolIdx = findRunningToolIndex(msgs, event.toolId, event.index)
             if (toolIdx !== -1) {
               const tool = msgs[toolIdx]
-              msgs[toolIdx] = { ...tool, toolInput: (tool.toolInput || '') + event.partialInput }
+              msgs[toolIdx] = {
+                ...tool,
+                toolInput: event.updateMode === 'replace' ? event.partialInput : (tool.toolInput || '') + event.partialInput,
+              }
             }
             updated.messages = msgs
             break
@@ -1182,15 +1253,19 @@ export const useSessionStore = create<State>((set, get) => ({
               totalCostUsd: event.costUsd,
               durationMs: event.durationMs,
               numTurns: event.numTurns,
-              usage: event.usage,
+              usage: normalizeUsageData(event.usage),
               sessionId: event.sessionId,
             }
-            if (event.usage) {
+            if (hasUsageData(event.usage)) {
+              const usage = normalizeUsageData(event.usage)
+              const delta = usageToTokenUsage(usage)
               updated.tokenUsage = {
-                input: (updated.tokenUsage?.input || 0) + (event.usage.input_tokens || 0),
-                output: (updated.tokenUsage?.output || 0) + (event.usage.output_tokens || 0),
-                cacheRead: (updated.tokenUsage?.cacheRead || 0) + (event.usage.cache_read_input_tokens || 0),
-                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + (event.usage.cache_creation_input_tokens || 0),
+                input: (updated.tokenUsage?.input || 0) + delta.input,
+                output: (updated.tokenUsage?.output || 0) + delta.output,
+                cacheRead: (updated.tokenUsage?.cacheRead || 0) + delta.cacheRead,
+                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + delta.cacheCreation,
+                reasoning: (updated.tokenUsage?.reasoning || 0) + delta.reasoning,
+                total: (updated.tokenUsage?.total || 0) + delta.total,
               }
             }
             // ── Final text fallback ──
@@ -1209,7 +1284,7 @@ export const useSessionStore = create<State>((set, get) => ({
               if (!hasAnyText) {
                 updated.messages = [
                   ...updated.messages,
-                  { id: nextMsgId(), role: 'assistant' as const, content: event.result, timestamp: Date.now() },
+                  { id: nextMsgId(), role: 'assistant' as const, content: event.result, streamId: `${event.sessionId || tabId}-result`, timestamp: Date.now() },
                 ]
               }
             }

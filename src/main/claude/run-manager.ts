@@ -9,7 +9,8 @@ import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import { getScreenToolsMcpConfig } from '../mcp/screen-tools-config'
 import { getComputerUseMcpConfig } from '../mcp/computer-use-config'
-import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError } from '../../shared/types'
+import { hasUsageData } from '../../shared/usage'
+import type { ClaudeEvent, NormalizedEvent, RunOptions, EnrichedError, UsageData } from '../../shared/types'
 
 const MAX_RING_LINES = 100
 const DEBUG = process.env.CLUI_DEBUG === '1'
@@ -100,6 +101,7 @@ export interface RunHandle {
   keepAlive: boolean
   model?: string
   codexTextLengths: Map<string, number>
+  codexFallbackUsage?: UsageData
 }
 
 /**
@@ -628,13 +630,33 @@ export class RunManager extends EventEmitter {
         if (evt.type === 'tool_call') handle.toolCallCount++
         if (isCodex && evt.type === 'text_chunk') {
           const r = raw as any
-          const itemId = r.item?.id || '_default'
+          const payload = r?.type === 'event_msg' && r?.payload ? r.payload : r
+          const item = payload?.item || r?.item
+          const itemId = evt.streamId || item?.id || '_default'
           const prevLen = handle.codexTextLengths.get(itemId) || 0
-          const fullText = r.item?.text || ''
+          const fullText = item?.text || (evt.appendMode === 'block' ? evt.text : '')
+          if (!item && evt.appendMode === 'block') {
+            this.emit('normalized', handle.runId, evt)
+            continue
+          }
+          if (!fullText) {
+            this.emit('normalized', handle.runId, evt)
+            continue
+          }
           if (fullText.length > prevLen) {
             handle.codexTextLengths.set(itemId, fullText.length)
-            this.emit('normalized', handle.runId, { type: 'text_chunk', text: fullText.substring(prevLen) })
+            this.emit('normalized', handle.runId, { type: 'text_chunk', text: fullText.substring(prevLen), streamId: itemId, appendMode: 'stream' })
           }
+          continue
+        }
+        if (isCodex && evt.type === 'usage') {
+          if (hasUsageData(evt.usage)) {
+            handle.codexFallbackUsage = evt.usage
+          }
+          continue
+        }
+        if (isCodex && evt.type === 'task_complete' && !hasUsageData(evt.usage) && handle.codexFallbackUsage) {
+          this.emit('normalized', handle.runId, { ...evt, usage: handle.codexFallbackUsage })
           continue
         }
         this.emit('normalized', handle.runId, evt)
@@ -719,6 +741,8 @@ export class RunManager extends EventEmitter {
     handle.toolCallCount = 0
     handle.sawPermissionRequest = false
     handle.permissionDenials = []
+    handle.codexTextLengths.clear()
+    handle.codexFallbackUsage = undefined
 
     const userMessage = JSON.stringify({
       type: 'user',

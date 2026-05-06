@@ -5,6 +5,7 @@ import { useSessionStore, useActiveTab, AVAILABLE_MODELS, DEFAULT_CODEX_MODEL_ID
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
+import { normalizeUsageData } from '../../shared/usage'
 
 const INPUT_MIN_HEIGHT = 20
 const INPUT_MAX_HEIGHT = 140
@@ -179,8 +180,18 @@ export function InputBar() {
         if (tab?.lastResult) {
           const r = tab.lastResult
           const parts = [`$${r.totalCostUsd.toFixed(4)}`, `${(r.durationMs / 1000).toFixed(1)}s`, `${r.numTurns} turn${r.numTurns !== 1 ? 's' : ''}`]
-          if (r.usage.input_tokens) {
-            parts.push(`${r.usage.input_tokens.toLocaleString()} in / ${(r.usage.output_tokens || 0).toLocaleString()} out`)
+          const usage = normalizeUsageData(r.usage)
+          if (usage.input_tokens || usage.output_tokens) {
+            parts.push(`${(usage.input_tokens || 0).toLocaleString()} in / ${(usage.output_tokens || 0).toLocaleString()} out`)
+          }
+          if (usage.cache_read_input_tokens || usage.cache_creation_input_tokens) {
+            parts.push(`${(usage.cache_read_input_tokens || 0).toLocaleString()} cache read / ${(usage.cache_creation_input_tokens || 0).toLocaleString()} cache write`)
+          }
+          if (usage.reasoning_output_tokens) {
+            parts.push(`${usage.reasoning_output_tokens.toLocaleString()} reasoning`)
+          }
+          if (usage.total_tokens) {
+            parts.push(`${usage.total_tokens.toLocaleString()} total`)
           }
           addSystemMessage(parts.join(' · '))
         } else {

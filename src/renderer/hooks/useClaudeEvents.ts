@@ -2,6 +2,10 @@ import { useEffect, useRef } from 'react'
 import { useSessionStore } from '../stores/sessionStore'
 import type { NormalizedEvent } from '../../shared/types'
 
+type TextChunkEvent = Extract<NormalizedEvent, { type: 'text_chunk' }>
+type ThinkingChunkEvent = Extract<NormalizedEvent, { type: 'thinking_chunk' }>
+type BufferedEvent<T> = { tabId: string; event: T }
+
 /**
  * Subscribes to all ControlPlane events via IPC and routes them
  * to the Zustand store.
@@ -15,8 +19,8 @@ export function useClaudeEvents() {
   const handleError = useSessionStore((s) => s.handleError)
   const handleRetryStatus = useSessionStore((s) => s.handleRetryStatus)
 
-  const chunkBufferRef = useRef<Map<string, string>>(new Map())
-  const thinkingBufferRef = useRef<Map<string, string>>(new Map())
+  const chunkBufferRef = useRef<Map<string, BufferedEvent<TextChunkEvent>>>(new Map())
+  const thinkingBufferRef = useRef<Map<string, BufferedEvent<ThinkingChunkEvent>>>(new Map())
   const rafIdRef = useRef<number>(0)
 
   useEffect(() => {
@@ -24,48 +28,61 @@ export function useClaudeEvents() {
       rafIdRef.current = 0
       const buffer = chunkBufferRef.current
       if (buffer.size > 0) {
-        for (const [tabId, text] of buffer) {
-          handleNormalizedEvent(tabId, { type: 'text_chunk', text } as NormalizedEvent)
+        for (const { tabId, event } of buffer.values()) {
+          handleNormalizedEvent(tabId, event)
         }
         buffer.clear()
       }
       const thinkingBuffer = thinkingBufferRef.current
       if (thinkingBuffer.size > 0) {
-        for (const [tabId, thinking] of thinkingBuffer) {
-          handleNormalizedEvent(tabId, { type: 'thinking_chunk', thinking } as NormalizedEvent)
+        for (const { tabId, event } of thinkingBuffer.values()) {
+          handleNormalizedEvent(tabId, event)
         }
         thinkingBuffer.clear()
       }
     }
 
+    const requestFlush = () => {
+      if (!rafIdRef.current) {
+        rafIdRef.current = requestAnimationFrame(flushChunks)
+      }
+    }
+
     const unsubEvent = window.clui.onEvent((tabId, event) => {
       if (event.type === 'text_chunk') {
-        const buffer = chunkBufferRef.current
-        const existing = buffer.get(tabId) || ''
-        buffer.set(tabId, existing + (event as any).text)
-
-        if (!rafIdRef.current) {
-          rafIdRef.current = requestAnimationFrame(flushChunks)
+        if (event.appendMode === 'block') {
+          if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current)
+            flushChunks()
+          }
+          handleNormalizedEvent(tabId, event)
+          return
         }
+        const buffer = chunkBufferRef.current
+        const key = `${tabId}\u0000${event.streamId || ''}\u0000${event.appendMode || 'stream'}`
+        const existing = buffer.get(key)
+        buffer.set(key, {
+          tabId,
+          event: existing
+            ? { ...event, text: existing.event.text + event.text }
+            : event,
+        })
+
+        requestFlush()
       } else if (event.type === 'thinking_chunk') {
         const buffer = thinkingBufferRef.current
-        const existing = buffer.get(tabId) || ''
-        buffer.set(tabId, existing + (event as any).thinking)
+        const key = `${tabId}\u0000${event.streamId || ''}\u0000${event.insertBeforeAssistant ? 'before' : 'after'}`
+        const existing = buffer.get(key)
+        buffer.set(key, {
+          tabId,
+          event: existing
+            ? { ...event, thinking: existing.event.thinking + event.thinking }
+            : event,
+        })
 
-        if (!rafIdRef.current) {
-          rafIdRef.current = requestAnimationFrame(flushChunks)
-        }
+        requestFlush()
       } else {
-        // task_update and task_complete contain fallback text logic that checks
-        // whether any assistant text has already been rendered. If a RAF flush is
-        // pending, those checks would see stale state and incorrectly conclude
-        // "no text yet" — causing duplicate messages once the RAF fires.
-        // Flush synchronously before handling these events so the store sees the
-        // correct message state.
-        if (
-          (event.type === 'task_update' || event.type === 'task_complete') &&
-          rafIdRef.current
-        ) {
+        if (rafIdRef.current) {
           cancelAnimationFrame(rafIdRef.current)
           flushChunks()
         }
