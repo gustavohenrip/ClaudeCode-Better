@@ -15,9 +15,13 @@ Desktop.ini
 .cursor/
 .vscode/
 .idea/
+.codex/
 *.swp
 *.swo
 *~
+MEMORY.md
+memory.md
+src 2/
 
 # Claude Code project-scoped local settings
 .claude/settings.local.json
@@ -25,6 +29,9 @@ Desktop.ini
 # Environment (not needed for core flow, but excluded defensively)
 .env
 .env.*
+tokens/
+*.token
+*.tokens
 .codex_conversations
 CLAUDE.md
 

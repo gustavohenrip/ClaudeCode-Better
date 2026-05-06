@@ -24,9 +24,53 @@ function validatePluginName(name: string): void {
   }
 }
 
+interface MarketplaceSourceRef {
+  repo: string
+  path: string
+  ref: string
+}
+
+function parseGitHubRepo(url: string): string | null {
+  const match = url.trim().replace(/\.git$/, '').match(/^https:\/\/github\.com\/([^/]+\/[^/]+)(?:\/.*)?$/i)
+  return match ? match[1] : null
+}
+
+function normalizeMarketplaceSource(source: unknown, fallbackName: string, defaultRepo: string): MarketplaceSourceRef {
+  if (typeof source === 'string') {
+    return {
+      repo: defaultRepo,
+      path: source.replace(/^\.\//, '').replace(/\/$/, ''),
+      ref: 'main',
+    }
+  }
+  if (source && typeof source === 'object') {
+    const data = source as Record<string, unknown>
+    const urlRepo = typeof data.url === 'string' ? parseGitHubRepo(data.url) : null
+    const repo = typeof data.repo === 'string' && data.repo.trim() ? data.repo.trim() : urlRepo || defaultRepo
+    const refValue = data.sha ?? data.commit ?? data.ref
+    const ref = typeof refValue === 'string' && refValue.trim() ? refValue.trim() : 'main'
+    if (typeof data.path === 'string' && data.path.trim()) {
+      return {
+        repo,
+        path: data.path.replace(/^\.\//, '').replace(/\/$/, ''),
+        ref,
+      }
+    }
+    return { repo, path: '', ref }
+  }
+  return { repo: defaultRepo, path: fallbackName, ref: 'main' }
+}
+
+function rawGitHubUrl(repo: string, ref: string, path: string, file: string): string {
+  const cleanPath = path.replace(/^\.\//, '').replace(/\/$/, '')
+  const suffix = cleanPath ? `${cleanPath}/${file}` : file
+  return `https://raw.githubusercontent.com/${repo}/${ref}/${suffix}`
+}
+
 // ─── Sources ───
 
 const SOURCES = [
+  { repo: 'anthropics/claude-plugins-official', category: 'Official Plugins' },
   { repo: 'anthropics/skills', category: 'Agent Skills' },
   { repo: 'anthropics/knowledge-work-plugins', category: 'Knowledge Work' },
   { repo: 'anthropics/financial-services-plugins', category: 'Financial Services' },
@@ -65,9 +109,10 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
         name: string
         plugins: Array<{
           name: string
-          source: string
+          source: unknown
           description?: string
           author?: { name: string } | string
+          category?: string
           skills?: string[]
         }>
       }
@@ -78,7 +123,7 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
 
       // Flatten: for entries with a skills[] array, expand each skill as its own catalog item.
       // For entries without skills[] (knowledge-work, financial-services), use plugin.json as before.
-      type FetchJob = { installName: string; skillPath: string; entryDescription: string; entryAuthor: string; useSkillMd: boolean }
+      type FetchJob = { installName: string; skillPath: string; fetchRepo: string; fetchRef: string; fetchPath: string; entryDescription: string; entryAuthor: string; useSkillMd: boolean; category: string }
       const jobs: FetchJob[] = []
 
       for (const entry of marketplaceData.plugins) {
@@ -96,20 +141,27 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
             jobs.push({
               installName: individualName,
               skillPath,
+              fetchRepo: source.repo,
+              fetchRef: 'main',
+              fetchPath: skillPath,
               entryDescription: entry.description || '',
               entryAuthor,
               useSkillMd: true,
+              category: entry.category || source.category,
             })
           }
         } else {
-          // Standard plugin: source points to a directory with .claude-plugin/plugin.json
-          const normalizedSource = entry.source.replace(/^\.\//, '').replace(/\/$/, '')
+          const normalizedSource = normalizeMarketplaceSource(entry.source, entry.name, source.repo)
           jobs.push({
             installName: entry.name,
-            skillPath: normalizedSource || entry.name,
+            skillPath: normalizedSource.path || entry.name,
+            fetchRepo: normalizedSource.repo,
+            fetchRef: normalizedSource.ref,
+            fetchPath: normalizedSource.path,
             entryDescription: entry.description || '',
             entryAuthor,
             useSkillMd: false,
+            category: entry.category || source.category,
           })
         }
       }
@@ -123,7 +175,7 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
 
           if (job.useSkillMd) {
             // Fetch SKILL.md and parse frontmatter for name/description
-            const skillUrl = `https://raw.githubusercontent.com/${source.repo}/main/${job.skillPath}/SKILL.md`
+            const skillUrl = rawGitHubUrl(job.fetchRepo, job.fetchRef, job.fetchPath, 'SKILL.md')
             try {
               const res = await netFetch(skillUrl)
               if (res.ok) {
@@ -138,7 +190,7 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
             }
           } else {
             // Fetch plugin.json
-            const pluginUrl = `https://raw.githubusercontent.com/${source.repo}/main/${job.skillPath}/.claude-plugin/plugin.json`
+            const pluginUrl = rawGitHubUrl(job.fetchRepo, job.fetchRef, job.fetchPath, '.claude-plugin/plugin.json')
             try {
               const res = await netFetch(pluginUrl)
               if (res.ok) {
@@ -168,7 +220,7 @@ export async function fetchCatalog(forceRefresh?: boolean): Promise<{ plugins: C
             repo: source.repo,
             sourcePath: job.skillPath,
             installName: job.installName,
-            category: source.category,
+            category: job.category,
             tags: deriveSemanticTags(name, description, job.skillPath),
             isSkillMd: job.useSkillMd,
           }

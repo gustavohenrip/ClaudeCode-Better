@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database, WarningCircle, ArrowCounterClockwise } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getCodexModelOptions, getEffectiveModelId } from '../stores/sessionStore'
 import { useCodexQuota } from '../hooks/useCodexQuota'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -84,7 +84,7 @@ function ModelPicker() {
   const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
   const isCodex = tab?.provider === 'codex'
   const isOpenClaude = tab?.provider === 'openclaude'
-  const models = isCodex ? CODEX_MODELS : AVAILABLE_MODELS
+  const models = isCodex ? getCodexModelOptions(preferredCodexModel || tab?.sessionModel || null) : AVAILABLE_MODELS
 
   const updatePos = useCallback(() => {
     if (!triggerRef.current) return
@@ -121,11 +121,11 @@ function ModelPicker() {
     }
     if (isCodex) {
       if (preferredCodexModel) {
-        const m = CODEX_MODELS.find((m) => m.id === preferredCodexModel)
-        if (m) return m.label
+        const m = models.find((m) => m.id === preferredCodexModel)
+        return m?.label || preferredCodexModel
       }
       if (tab?.sessionModel) {
-        const m = CODEX_MODELS.find((m) => m.id === tab.sessionModel)
+        const m = models.find((m) => m.id === tab.sessionModel)
         return m?.label || tab.sessionModel
       }
       return CODEX_MODELS.find((m) => m.id === DEFAULT_CODEX_MODEL_ID)?.label || DEFAULT_CODEX_MODEL_ID

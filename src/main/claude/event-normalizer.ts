@@ -9,6 +9,8 @@ import type {
   PermissionEvent,
   ContentDelta,
 } from '../../shared/types'
+import { normalizeAskUserQuestionToolInput } from '../native-harness/ask-user-question'
+import { getNativeToolNames } from '../native-harness/tool-registry'
 
 /**
  * Maps raw Claude stream-json events to canonical CLUI events.
@@ -49,7 +51,7 @@ function normalizeSystem(event: InitEvent): NormalizedEvent[] {
   return [{
     type: 'session_init',
     sessionId: event.session_id,
-    tools: event.tools || [],
+    tools: [...new Set([...(event.tools || []), ...getNativeToolNames()])],
     model: event.model || 'unknown',
     mcpServers: event.mcp_servers || [],
     skills: event.skills || [],
@@ -64,12 +66,17 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
   switch (sub.type) {
     case 'content_block_start': {
       if (sub.content_block.type === 'tool_use') {
-        return [{
+        const toolCall: NormalizedEvent = {
           type: 'tool_call',
           toolName: sub.content_block.name || 'unknown',
           toolId: sub.content_block.id || '',
           index: sub.index,
-        }]
+        }
+        if (isAskUserQuestionTool(sub.content_block)) {
+          const event = normalizeAskUserQuestionToolInput(sub.content_block.input, sub.content_block.id || '')
+          return event ? [toolCall, event] : [toolCall]
+        }
+        return [toolCall]
       }
       // text block start — no event needed, text comes via deltas
       return []
@@ -438,7 +445,10 @@ function normalizeCodexItemStarted(item: any): NormalizedEvent[] {
     }
 
     case 'mcp_tool_call':
-      if (isAskUserQuestionTool(item)) return normalizeAskUserQuestionPayload(item.arguments ?? item.input ?? item.params, item.id || '')
+      if (isAskUserQuestionTool(item)) {
+        const event = normalizeAskUserQuestionToolInput(item.arguments ?? item.input ?? item.params, item.id || '')
+        return event ? [event] : []
+      }
       return [{ type: 'tool_call', toolName: `${item.server || 'mcp'}:${getCodexToolName(item)}`, toolId: item.id || '', index: 0 }]
 
     case 'web_search':
@@ -524,7 +534,10 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
     }
 
     case 'mcp_tool_call': {
-      if (isAskUserQuestionTool(item)) return normalizeAskUserQuestionPayload(item.arguments ?? item.input ?? item.params, item.id || '')
+      if (isAskUserQuestionTool(item)) {
+        const event = normalizeAskUserQuestionToolInput(item.arguments ?? item.input ?? item.params, item.id || '')
+        return event ? [event] : []
+      }
       const events: NormalizedEvent[] = []
       if (item.arguments) {
         events.push({

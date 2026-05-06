@@ -1,9 +1,9 @@
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Question, ArrowUpRight, PencilSimple } from '@phosphor-icons/react'
+import { ArrowUpRight, CaretLeft, CaretRight, Check, PencilSimple, Question, WarningCircle, X } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useColors } from '../theme'
-import type { AskUserQuestionPayload } from '../../shared/types'
+import type { AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionPayload } from '../../shared/types'
 
 interface Props {
   tabId: string
@@ -11,58 +11,188 @@ interface Props {
   queueLength?: number
 }
 
+type DraftAnswer = {
+  selectedIds: string[]
+  otherText: string
+}
+
+const OTHER_ID = '__other__'
+const CUSTOM_ID = '__custom__'
+
+function normalizeQuestions(payload: AskUserQuestionPayload): AskUserQuestionItem[] {
+  if (payload.questions && payload.questions.length > 0) return payload.questions
+  return [{
+    id: payload.questionId,
+    question: payload.question,
+    header: payload.header,
+    options: payload.options,
+    multiSelect: payload.multiSelect,
+    allowOtherText: payload.allowOtherText,
+  }]
+}
+
+function getDraft(drafts: Record<string, DraftAnswer>, id: string): DraftAnswer {
+  return drafts[id] || { selectedIds: [], otherText: '' }
+}
+
+function isOtherId(id: string): boolean {
+  return id === OTHER_ID || id === CUSTOM_ID
+}
+
 export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props) {
   const respondUserQuestion = useSessionStore((s) => s.respondUserQuestion)
   const colors = useColors()
-  const [responded, setResponded] = useState(false)
-  const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [showOther, setShowOther] = useState(!question.options.length && question.allowOtherText)
-  const [otherText, setOtherText] = useState('')
-
+  const questions = normalizeQuestions(question)
+  const [currentIndex, setCurrentIndex] = useState(0)
+  const [drafts, setDrafts] = useState<Record<string, DraftAnswer>>({})
   const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(null)
+
+  const current = questions[Math.min(currentIndex, questions.length - 1)]
+  const draft = current ? getDraft(drafts, current.id) : { selectedIds: [], otherText: '' }
+  const isLast = currentIndex >= questions.length - 1
+  const hasValidationError = !!question.validationError
 
   useEffect(() => {
-    setResponded(false)
-    setSelectedIds([])
-    setShowOther(!question.options.length && question.allowOtherText)
-    setOtherText('')
+    setCurrentIndex(0)
+    setDrafts({})
     setSending(false)
-  }, [question.questionId, question.options.length, question.allowOtherText])
+    setError('')
+    setActivePreviewId(null)
+  }, [question.questionId])
+
+  const selectedLabelsFor = useCallback((item: AskUserQuestionItem, answer: DraftAnswer): string[] => {
+    return answer.selectedIds.flatMap((id) => {
+      if (isOtherId(id)) return []
+      const option = item.options.find((opt) => opt.id === id)
+      return option ? [option.label] : []
+    })
+  }, [])
+
+  const answerTextFor = useCallback((item: AskUserQuestionItem, answer: DraftAnswer): string => {
+    const labels = selectedLabelsFor(item, answer)
+    const other = answer.selectedIds.some(isOtherId) ? answer.otherText.trim() : ''
+    return [...labels, ...(other ? [other] : [])].join(', ').trim()
+  }, [selectedLabelsFor])
+
+  const isAnswered = useCallback((item: AskUserQuestionItem): boolean => {
+    const answer = getDraft(drafts, item.id)
+    return answerTextFor(item, answer).length > 0
+  }, [answerTextFor, drafts])
+
+  const allAnswered = !hasValidationError && questions.length > 0 && questions.every((item) => isAnswered(item))
+
+  const updateDraft = useCallback((id: string, updater: (draft: DraftAnswer) => DraftAnswer) => {
+    setDrafts((prev) => ({
+      ...prev,
+      [id]: updater(getDraft(prev, id)),
+    }))
+    setError('')
+  }, [])
 
   const toggleOption = useCallback((optionId: string) => {
-    if (responded || sending) return
-    if (question.multiSelect) {
-      setSelectedIds((prev) =>
-        prev.includes(optionId) ? prev.filter((id) => id !== optionId) : [...prev, optionId]
-      )
-    } else {
-      setSelectedIds((prev) => (prev[0] === optionId ? [] : [optionId]))
-    }
-  }, [question.multiSelect, responded, sending])
+    if (!current || sending) return
+    updateDraft(current.id, (prev) => {
+      if (current.multiSelect) {
+        const selectedIds = prev.selectedIds.includes(optionId)
+          ? prev.selectedIds.filter((id) => id !== optionId)
+          : [...prev.selectedIds, optionId]
+        return { ...prev, selectedIds }
+      }
+      return {
+        selectedIds: prev.selectedIds[0] === optionId ? [] : [optionId],
+        otherText: isOtherId(optionId) ? prev.otherText : '',
+      }
+    })
+    setActivePreviewId(optionId)
+  }, [current, sending, updateDraft])
 
-  const selectedLabels = selectedIds.flatMap((id) => {
-    if (id === '__custom__' || id === '__other__') return []
-    const option = question.options.find((o) => o.id === id)
-    return option ? [option.label] : []
-  })
-  const trimmedOtherText = otherText.trim()
-  const responseText = [...selectedLabels, ...(trimmedOtherText ? [trimmedOtherText] : [])].join(', ').trim()
+  const setOtherText = useCallback((value: string) => {
+    if (!current || sending) return
+    updateDraft(current.id, (prev) => {
+      const selectedIds = current.multiSelect
+        ? value.trim()
+          ? prev.selectedIds.includes(OTHER_ID)
+            ? prev.selectedIds
+            : [...prev.selectedIds, OTHER_ID]
+          : prev.selectedIds.filter((id) => !isOtherId(id))
+        : value.trim()
+          ? [OTHER_ID]
+          : prev.selectedIds.filter((id) => !isOtherId(id))
+      return { selectedIds, otherText: value }
+    })
+  }, [current, sending, updateDraft])
+
+  const goPrevious = useCallback(() => {
+    setCurrentIndex((value) => Math.max(0, value - 1))
+    setError('')
+    setActivePreviewId(null)
+  }, [])
+
+  const goNext = useCallback(() => {
+    if (!current || hasValidationError) return
+    if (!isAnswered(current)) {
+      setError('Choose an option or write an answer.')
+      return
+    }
+    setCurrentIndex((value) => Math.min(questions.length - 1, value + 1))
+    setError('')
+    setActivePreviewId(null)
+  }, [current, hasValidationError, isAnswered, questions.length])
+
+  const buildAnswers = useCallback((): AskUserQuestionAnswer[] => {
+    return questions.map((item) => {
+      const answer = getDraft(drafts, item.id)
+      const selectedLabels = selectedLabelsFor(item, answer)
+      const otherText = answer.selectedIds.some(isOtherId) ? answer.otherText.trim() : ''
+      return {
+        questionId: item.id,
+        question: item.question,
+        selectedIds: answer.selectedIds,
+        selectedLabels,
+        otherText: otherText || undefined,
+        answerText: answerTextFor(item, answer),
+      }
+    })
+  }, [answerTextFor, drafts, questions, selectedLabelsFor])
 
   const handleConfirm = useCallback(async () => {
-    if (responded || sending) return
-    if (!responseText) return
-
-    setResponded(true)
-    setSending(true)
-
-    const success = await respondUserQuestion(tabId, question.questionId, selectedIds, trimmedOtherText || undefined, responseText)
-    if (!success) {
-      setResponded(false)
-      setSending(false)
+    if (sending || !current || hasValidationError) return
+    if (!allAnswered) {
+      const missingIndex = questions.findIndex((item) => !isAnswered(item))
+      setCurrentIndex(Math.max(0, missingIndex))
+      setError('Answer every question before sending.')
+      return
     }
-  }, [responded, sending, responseText, respondUserQuestion, tabId, question.questionId, selectedIds, trimmedOtherText])
 
-  const canConfirm = responseText.length > 0
+    setSending(true)
+    setError('')
+    const answers = buildAnswers()
+    const success = await respondUserQuestion(tabId, question.questionId, answers)
+    if (!success) {
+      setSending(false)
+      setError('Could not send this answer. Try again.')
+    }
+  }, [allAnswered, buildAnswers, current, hasValidationError, isAnswered, question.questionId, questions, respondUserQuestion, sending, tabId])
+
+  const handleCancel = useCallback(async () => {
+    if (sending) return
+    setSending(true)
+    setError('')
+    const success = await respondUserQuestion(tabId, question.questionId, [], undefined, undefined, undefined, true)
+    if (!success) {
+      setSending(false)
+      setError('Could not cancel this question. Try again.')
+    }
+  }, [question.questionId, respondUserQuestion, sending, tabId])
+
+  if (!current) return null
+
+  const activePreview = (activePreviewId
+    ? current.options.find((opt) => opt.id === activePreviewId)?.preview
+    : undefined) || current.options.find((opt) => draft.selectedIds.includes(opt.id))?.preview
+  const canMoveNext = !hasValidationError && isAnswered(current)
 
   return (
     <motion.div
@@ -82,41 +212,54 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
         className="overflow-hidden"
       >
         <div
-          className="flex items-center gap-1.5 px-3 py-1.5"
+          className="flex items-center justify-between gap-2 px-3 py-1.5"
           style={{
             background: `${colors.accentSoft}18`,
             borderBottom: `1px solid ${colors.accentSoft}40`,
           }}
         >
-          <Question size={12} style={{ color: colors.accent }} />
-          <span className="text-[11px] font-semibold" style={{ color: colors.accent }}>
-            {question.header || 'Question'}
-          </span>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Question size={12} style={{ color: colors.accent }} />
+            <span className="text-[11px] font-semibold truncate" style={{ color: colors.accent }}>
+              {current.header || question.header || 'Question'}
+            </span>
+          </div>
+          {questions.length > 1 && (
+            <span className="text-[10px] tabular-nums" style={{ color: colors.textTertiary }}>
+              {currentIndex + 1}/{questions.length}
+            </span>
+          )}
         </div>
 
         <div className="px-3 py-2.5">
           <p className="text-[12px] leading-[1.5] mb-2" style={{ color: colors.textPrimary }}>
-            {question.question}
+            {current.question}
           </p>
 
-          {question.options.length > 0 && (
+          {question.validationError && (
+            <div
+              className="flex items-center gap-1.5 text-[10px] px-2 py-1.5 rounded-md mb-2"
+              style={{ color: '#b45309', background: 'rgba(245, 158, 11, 0.12)' }}
+            >
+              <WarningCircle size={12} />
+              <span>{question.validationError}</span>
+            </div>
+          )}
+
+          {current.options.length > 0 && (
             <div className="flex flex-col gap-1.5 mb-2">
-              {question.options.map((opt) => {
-                const isSelected = selectedIds.includes(opt.id)
-                const isOther = opt.id === '__other__'
+              {current.options.map((opt) => {
+                const isSelected = draft.selectedIds.includes(opt.id)
 
                 return (
                   <button
                     key={opt.id}
-                    onClick={() => {
-                      if (isOther) {
-                        setShowOther(true)
-                        if (!question.multiSelect) setSelectedIds([opt.id])
-                      } else {
-                        toggleOption(opt.id)
-                      }
-                    }}
-                    disabled={responded || sending}
+                    type="button"
+                    onClick={() => toggleOption(opt.id)}
+                    onFocus={() => setActivePreviewId(opt.id)}
+                    onMouseEnter={() => setActivePreviewId(opt.id)}
+                    disabled={sending}
+                    aria-pressed={isSelected}
                     className="text-[11px] font-medium px-3 py-2 rounded-lg text-left transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{
                       background: isSelected ? `${colors.accent}20` : `${colors.surfaceHover}80`,
@@ -132,95 +275,89 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
                           background: isSelected ? colors.accent : 'transparent',
                         }}
                       >
-                        {isSelected && (
-                          <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-                            <path d="M1 4L3 6L7 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
+                        {isSelected && <Check size={9} weight="bold" color="#fff" />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="font-medium">{opt.label}</div>
                         {opt.description && (
-                          <div className="text-[10px] mt-0.5" style={{ color: colors.textTertiary }}>
+                          <div className="text-[10px] mt-0.5 leading-[1.35]" style={{ color: colors.textTertiary }}>
                             {opt.description}
                           </div>
                         )}
                       </div>
-                      {isOther && !showOther && (
-                        <PencilSimple size={12} style={{ color: colors.textTertiary, flexShrink: 0 }} />
-                      )}
                     </div>
-
-                    {isOther && showOther && (
-                      <div className="mt-2">
-                        <textarea
-                          value={otherText}
-                          onChange={(e) => setOtherText(e.target.value)}
-                          onFocus={() => {
-                            if (!question.multiSelect) {
-                              setSelectedIds([opt.id])
-                            }
-                          }}
-                          placeholder="Type your response..."
-                          rows={2}
-                          className="w-full text-[11px] px-2.5 py-2 rounded-lg resize-none outline-none"
-                          style={{
-                            background: colors.codeBg,
-                            color: colors.textPrimary,
-                            border: `1px solid ${colors.toolBorder}`,
-                          }}
-                        />
-                      </div>
-                    )}
                   </button>
                 )
               })}
             </div>
           )}
 
-          {!showOther && question.allowOtherText && (
-            <button
-              onClick={() => {
-                setShowOther(true)
-                if (!question.multiSelect) setSelectedIds(['__custom__'])
-              }}
-              disabled={responded || sending}
-              className="text-[10px] px-2 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-40"
-              style={{
-                color: colors.accent,
-                background: 'transparent',
-                border: `1px solid ${colors.accentSoft}`,
-              }}
-            >
-              <PencilSimple size={10} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />
-              Write a custom response
-            </button>
-          )}
-
-          {showOther && !question.options.find((o) => o.id === '__other__') && (
+          {current.allowOtherText && (
             <div className="mb-2">
+              <label className="flex items-center gap-1.5 text-[10px] mb-1" style={{ color: colors.textTertiary }}>
+                <PencilSimple size={11} />
+                Other
+              </label>
               <textarea
-                value={otherText}
+                value={draft.otherText}
                 onChange={(e) => setOtherText(e.target.value)}
-                onFocus={() => {
-                  if (!question.multiSelect) {
-                    setSelectedIds(['__custom__'])
-                  }
-                }}
+                onFocus={() => setActivePreviewId(null)}
+                disabled={sending}
                 placeholder="Type your response..."
                 rows={2}
-                className="w-full text-[11px] px-2.5 py-2 rounded-lg resize-none outline-none"
+                className="w-full text-[11px] px-2.5 py-2 rounded-lg resize-none outline-none disabled:opacity-40"
                 style={{
                   background: colors.codeBg,
                   color: colors.textPrimary,
-                  border: `1px solid ${colors.toolBorder}`,
+                  border: `1px solid ${draft.otherText.trim() ? colors.accent + '66' : colors.toolBorder}`,
                 }}
               />
             </div>
           )}
 
-          <div className="flex items-center justify-between mt-3">
+          {activePreview && (
+            <pre
+              className="text-[10px] leading-[1.45] whitespace-pre-wrap rounded-lg p-2 mb-2 max-h-28 overflow-auto"
+              style={{
+                color: colors.textSecondary,
+                background: colors.codeBg,
+                border: `1px solid ${colors.toolBorder}`,
+              }}
+            >
+              {activePreview}
+            </pre>
+          )}
+
+          {error && (
+            <div className="text-[10px] mb-2" style={{ color: '#ef4444' }}>
+              {error}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between mt-3 gap-2">
             <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={handleCancel}
+                disabled={sending}
+                aria-label="Cancel question"
+                className="w-7 h-7 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                style={{ background: colors.surfaceHover, color: colors.textSecondary, border: `1px solid ${colors.toolBorder}` }}
+              >
+                <X size={12} weight="bold" />
+              </button>
+              {questions.length > 1 && (
+                <button
+                  type="button"
+                  onClick={goPrevious}
+                  disabled={currentIndex === 0 || sending}
+                  aria-label="Previous question"
+                  className="w-7 h-7 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                  style={{ background: colors.surfaceHover, color: colors.textSecondary, border: `1px solid ${colors.toolBorder}` }}
+                >
+                  <CaretLeft size={12} weight="bold" />
+                </button>
+              )}
               {queueLength > 1 && (
                 <span
                   className="text-[10px] px-2 py-0.5 rounded-full"
@@ -234,29 +371,38 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
               )}
             </div>
 
-            <button
-              onClick={handleConfirm}
-              disabled={!canConfirm || responded || sending}
-              className="flex items-center gap-1.5 text-[11px] font-medium px-4 py-1.5 rounded-full transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                background: canConfirm ? colors.accent : colors.surfaceHover,
-                color: canConfirm ? '#fff' : colors.textTertiary,
-                border: 'none',
-                boxShadow: canConfirm ? `0 2px 8px ${colors.accent}40` : 'none',
-              }}
-            >
-              {sending ? (
-                <>
-                  <ArrowUpRight size={11} weight="bold" />
-                  Sending...
-                </>
-              ) : (
-                <>
-                  <ArrowUpRight size={11} weight="bold" />
-                  Confirm
-                </>
-              )}
-            </button>
+            {!isLast ? (
+              <button
+                type="button"
+                onClick={goNext}
+                disabled={!canMoveNext || sending}
+                className="flex items-center gap-1.5 text-[11px] font-medium px-3 py-1.5 rounded-full transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background: canMoveNext ? colors.accent : colors.surfaceHover,
+                  color: canMoveNext ? '#fff' : colors.textTertiary,
+                  border: 'none',
+                }}
+              >
+                Next
+                <CaretRight size={11} weight="bold" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={!allAnswered || sending}
+                className="flex items-center gap-1.5 text-[11px] font-medium px-4 py-1.5 rounded-full transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background: allAnswered ? colors.accent : colors.surfaceHover,
+                  color: allAnswered ? '#fff' : colors.textTertiary,
+                  border: 'none',
+                  boxShadow: allAnswered ? `0 2px 8px ${colors.accent}40` : 'none',
+                }}
+              >
+                <ArrowUpRight size={11} weight="bold" />
+                {sending ? 'Sending...' : 'Confirm'}
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -19,7 +19,7 @@ const DEBUG = process.env.CLUI_DEBUG === '1'
 const CLUI_SYSTEM_HINT = [
   'IMPORTANT: You are NOT running in a terminal. You are running inside CLUI,',
   'a desktop chat application with a rich UI that renders full markdown.',
-  'CLUI is a GUI wrapper around Claude Code — the user sees your output in a',
+  'CLUI is a desktop coding interface — the user sees your output in a',
   'styled conversation view, not a raw terminal.',
   '',
   'Because CLUI renders markdown natively, you MUST use rich formatting when it helps:',
@@ -62,6 +62,7 @@ const SAFE_TOOLS = [
 // Includes safe + dangerous tools so nothing is silently denied.
 const DEFAULT_ALLOWED_TOOLS = [
   'Bash', 'Edit', 'Write', 'MultiEdit',
+  'AskUserQuestion',
   'move_mouse', 'click_mouse', 'scroll_mouse', 'drag_mouse',
   'type_text', 'press_key',
   'browser_navigate', 'browser_execute_js', 'browser_click', 'browser_type', 'browser_close',
@@ -70,6 +71,19 @@ const DEFAULT_ALLOWED_TOOLS = [
 
 function log(msg: string): void {
   _log('RunManager', msg)
+}
+
+function summarizeStdinMessage(message: object): string {
+  const data = message as Record<string, any>
+  if (data.type === 'user') {
+    const content = Array.isArray(data.message?.content) ? data.message.content : []
+    const blockTypes = content.map((block: any) => typeof block?.type === 'string' ? block.type : 'unknown').join(',')
+    return `type=user role=${data.message?.role || 'unknown'} blocks=${blockTypes || 'none'}`
+  }
+  if (data.type === 'permission_response') {
+    return `type=permission_response question=${String(data.question_id || '').substring(0, 40)} option=${String(data.option_id || '').substring(0, 40)}`
+  }
+  return `type=${String(data.type || 'unknown')}`
 }
 
 export interface RunHandle {
@@ -729,7 +743,7 @@ export class RunManager extends EventEmitter {
     if (!handle.process.stdin || handle.process.stdin.destroyed) return false
 
     const json = JSON.stringify(message)
-    log(`Writing to stdin [${requestId}]: ${json.substring(0, 200)}`)
+    log(`Writing to stdin [${requestId}]: ${summarizeStdinMessage(message)}`)
     handle.process.stdin.write(json + '\n')
     return true
   }

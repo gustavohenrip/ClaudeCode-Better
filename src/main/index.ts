@@ -12,7 +12,7 @@ import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './m
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, EnrichedError, CodexQuota } from '../shared/types'
+import type { AskUserQuestionAnswer, RunOptions, NormalizedEvent, EnrichedError, CodexQuota } from '../shared/types'
 
 const DEBUG_MODE = process.env.CLUI_DEBUG === '1'
 const SPACES_DEBUG = DEBUG_MODE || process.env.CLUI_SPACES_DEBUG === '1'
@@ -42,6 +42,8 @@ const execFileAsync = promisify(execFile)
 const START_CACHE_FILE = join(homedir(), '.claude', 'clui-start-cache.json')
 const START_TTL_MS = 5 * 60 * 1000
 const START_SOFT_WAIT_MS = 120
+const MAX_ASK_ANSWER_ITEMS = 4
+const MAX_ASK_TEXT_CHARS = 20_000
 
 type StartCache = { version: string; auth: Record<string, unknown>; mcpServers: string[]; updatedAt: number }
 let startCache: StartCache | null = null
@@ -57,6 +59,35 @@ function loadStartCache(): StartCache | null {
 
 function saveStartCache(c: StartCache): void {
   try { mkdirSync(dirname(START_CACHE_FILE), { recursive: true }); writeFileSync(START_CACHE_FILE, JSON.stringify(c), 'utf-8') } catch {}
+}
+
+function safeAskText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return value.trim().slice(0, MAX_ASK_TEXT_CHARS)
+}
+
+function safeAskStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => typeof item === 'string' ? [item.slice(0, MAX_ASK_TEXT_CHARS)] : []).slice(0, MAX_ASK_ANSWER_ITEMS)
+}
+
+function safeAskAnswers(value: unknown): AskUserQuestionAnswer[] {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, MAX_ASK_ANSWER_ITEMS).flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const data = item as Record<string, unknown>
+    const questionId = safeAskText(data.questionId)
+    const question = safeAskText(data.question)
+    if (!questionId || !question) return []
+    return [{
+      questionId,
+      question,
+      selectedIds: safeAskStringArray(data.selectedIds),
+      selectedLabels: safeAskStringArray(data.selectedLabels),
+      otherText: safeAskText(data.otherText),
+      answerText: safeAskText(data.answerText) || '',
+    }]
+  })
 }
 
 async function runClaudeCmd(args: string[], timeout: number): Promise<string> {
@@ -844,15 +875,25 @@ ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }:
   return controlPlane.respondToPermission(tabId, questionId, optionId)
 })
 
-ipcMain.handle(IPC.RESPOND_USER_QUESTION, (_event, payload: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string } | null | undefined) => {
-  const data: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string } = payload && typeof payload === 'object' ? payload : {}
+ipcMain.handle(IPC.RESPOND_USER_QUESTION, (_event, payload: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string; answers?: AskUserQuestionAnswer[]; cancelled?: boolean } | null | undefined) => {
+  const data: { tabId?: string; questionId?: string; selectedIds?: string[]; otherText?: string; answerText?: string; answers?: AskUserQuestionAnswer[]; cancelled?: boolean } = payload && typeof payload === 'object' ? payload : {}
   const tabId = typeof data.tabId === 'string' ? data.tabId : ''
   const questionId = typeof data.questionId === 'string' ? data.questionId : ''
-  const selectedIds = Array.isArray(data.selectedIds) ? data.selectedIds : []
-  const answer = typeof data.answerText === 'string' ? data.answerText.trim() : ''
-  log(`IPC RESPOND_USER_QUESTION: tab=${tabId} question=${questionId} selections=${selectedIds.length} answer=${!!answer}`)
-  if (!tabId || !questionId || !answer) return false
-  return controlPlane.respondToUserQuestion(tabId, answer)
+  const selectedIds = safeAskStringArray(data.selectedIds)
+  const answer = safeAskText(data.answerText) || ''
+  const answers = safeAskAnswers(data.answers)
+  const cancelled = data.cancelled === true
+  log(`IPC RESPOND_USER_QUESTION: tab=${tabId} question=${questionId} selections=${selectedIds.length} answers=${answers.length} cancelled=${cancelled}`)
+  if (!tabId || !questionId || (!cancelled && !answer && answers.length === 0)) return false
+  return controlPlane.respondToUserQuestion({
+    tabId,
+    questionId,
+    selectedIds,
+    otherText: safeAskText(data.otherText),
+    answerText: answer,
+    answers,
+    cancelled,
+  })
 })
 
 function extractCodexUserMessage(title: string, firstMsg: string): string {

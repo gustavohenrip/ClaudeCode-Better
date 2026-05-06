@@ -5,6 +5,7 @@ import { PermissionServer, maskSensitiveFields } from '../hooks/permission-serve
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
 import { isRetryableError } from './retry-manager'
 import { log as _log } from '../logger'
+import { NativeAskUserQuestionHarness, normalizeAskUserQuestionToolInput, type AskUserQuestionResolvePayload, type ResolvedAskUserQuestion } from '../native-harness/ask-user-question'
 import type {
   TabStatus,
   TabRegistryEntry,
@@ -37,6 +38,23 @@ interface InflightRequest {
   promise: Promise<void>
   resolve: (value: void) => void
   reject: (reason: Error) => void
+}
+
+interface AskUserQuestionToolBuffer {
+  toolName: string
+  toolId: string
+  index: number
+  input: string
+}
+
+type AskUserQuestionEvent = Extract<NormalizedEvent, { type: 'ask_user_question' }>
+
+function isAskUserQuestionToolName(name?: string): boolean {
+  return (name || '').split(':').pop()!.replace(/[_-]/g, '').toLowerCase() === 'askuserquestion'
+}
+
+function askToolBufferKey(toolId?: string, index?: number): string {
+  return toolId || `index:${index ?? 0}`
 }
 
 /**
@@ -79,6 +97,8 @@ export class ControlPlane extends EventEmitter {
   private hookServerReady: Promise<void>
   private warmHandles = new Map<string, { requestId: string; cwd: string; model?: string }>()
   private resumedRequests = new Map<string, { tabId: string; options: RunOptions }>()
+  private askUserQuestionHarness = new NativeAskUserQuestionHarness()
+  private askQuestionToolBuffers = new Map<string, Map<string, AskUserQuestionToolBuffer>>()
   /** Track options for active retries so re-failed retries can re-schedule */
   private activeRetryOptions = new Map<string, { tabId: string; options: RunOptions; attempt: number; reason: string }>()
   /** Last request options per requestId — used by retry to reconstruct RunOptions */
@@ -190,7 +210,7 @@ export class ControlPlane extends EventEmitter {
           this.emit('event', tabId, event)
         }
       } else {
-        this.emit('event', tabId, event)
+        this._emitNormalizedEvent(requestId, tabId, event)
       }
 
       if (event.type === 'task_complete') {
@@ -220,6 +240,7 @@ export class ControlPlane extends EventEmitter {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
+      this._clearRequestState(requestId)
 
       for (const [wTabId, warm] of this.warmHandles) {
         if (warm.requestId === requestId) {
@@ -314,6 +335,7 @@ export class ControlPlane extends EventEmitter {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
+      this._clearRequestState(requestId)
 
       const tabId = this._findTabByRequest(requestId)
 
@@ -388,6 +410,83 @@ export class ControlPlane extends EventEmitter {
     })
   }
 
+  private _emitNormalizedEvent(requestId: string, tabId: string, event: NormalizedEvent): void {
+    const askEvent = this._captureAskUserQuestionEvent(requestId, event)
+    if (event.type === 'ask_user_question') {
+      this.askUserQuestionHarness.register(tabId, requestId, event)
+      this.emit('event', tabId, event)
+      return
+    }
+    if (askEvent) {
+      this.askUserQuestionHarness.register(tabId, requestId, askEvent)
+      this.emit('event', tabId, askEvent)
+    }
+    this.emit('event', tabId, event)
+  }
+
+  private _captureAskUserQuestionEvent(requestId: string, event: NormalizedEvent): AskUserQuestionEvent | null {
+    if (event.type === 'tool_call') {
+      if (!isAskUserQuestionToolName(event.toolName)) return null
+      const buffers = this._askToolBuffersForRequest(requestId)
+      buffers.set(askToolBufferKey(event.toolId, event.index), {
+        toolName: event.toolName,
+        toolId: event.toolId,
+        index: event.index,
+        input: '',
+      })
+      return null
+    }
+
+    if (event.type === 'tool_call_update') {
+      const buffer = this._findAskToolBuffer(requestId, event.toolId, event.index)
+      if (buffer) buffer.input += event.partialInput
+      return null
+    }
+
+    if (event.type === 'tool_call_complete') {
+      const buffers = this.askQuestionToolBuffers.get(requestId)
+      const buffer = this._findAskToolBuffer(requestId, event.toolId, event.index)
+      if (!buffer) return null
+      buffers?.delete(askToolBufferKey(buffer.toolId, buffer.index))
+      if (buffers && buffers.size === 0) this.askQuestionToolBuffers.delete(requestId)
+      const normalized = normalizeAskUserQuestionToolInput(buffer.input, buffer.toolId || event.toolId || '')
+      return normalized && normalized.type === 'ask_user_question' ? normalized : null
+    }
+
+    return null
+  }
+
+  private _askToolBuffersForRequest(requestId: string): Map<string, AskUserQuestionToolBuffer> {
+    let buffers = this.askQuestionToolBuffers.get(requestId)
+    if (!buffers) {
+      buffers = new Map()
+      this.askQuestionToolBuffers.set(requestId, buffers)
+    }
+    return buffers
+  }
+
+  private _findAskToolBuffer(requestId: string, toolId?: string, index?: number): AskUserQuestionToolBuffer | null {
+    const buffers = this.askQuestionToolBuffers.get(requestId)
+    if (!buffers) return null
+    if (toolId) {
+      const byToolId = buffers.get(askToolBufferKey(toolId, index))
+      if (byToolId) return byToolId
+    }
+    if (typeof index === 'number') {
+      const byIndex = buffers.get(askToolBufferKey('', index))
+      if (byIndex) return byIndex
+      for (const buffer of buffers.values()) {
+        if (buffer.index === index) return buffer
+      }
+    }
+    return null
+  }
+
+  private _clearRequestState(requestId: string): void {
+    this.askQuestionToolBuffers.delete(requestId)
+    this.askUserQuestionHarness.clearRequest(requestId)
+  }
+
   /**
    * Wire PtyRunManager events using the same routing logic as RunManager.
    */
@@ -421,7 +520,7 @@ export class ControlPlane extends EventEmitter {
       // Suppress events from init requests
       if (this.initRequestIds.has(requestId)) return
 
-      this.emit('event', tabId, event)
+      this._emitNormalizedEvent(requestId, tabId, event)
     })
 
     // Exit events
@@ -432,6 +531,7 @@ export class ControlPlane extends EventEmitter {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
+      this._clearRequestState(requestId)
 
       const tabId = this._findTabByRequest(requestId)
       const inflight = this.inflightRequests.get(requestId)
@@ -489,6 +589,7 @@ export class ControlPlane extends EventEmitter {
         this.permissionServer.unregisterRun(runToken)
         this.runTokens.delete(requestId)
       }
+      this._clearRequestState(requestId)
 
       const tabId = this._findTabByRequest(requestId)
       const inflight = this.inflightRequests.get(requestId)
@@ -669,6 +770,7 @@ export class ControlPlane extends EventEmitter {
     })
 
     this.tabs.delete(tabId)
+    this.askUserQuestionHarness.clearTab(tabId)
     log(`Tab closed: ${tabId}`)
   }
 
@@ -1020,16 +1122,49 @@ export class ControlPlane extends EventEmitter {
     return this.runManager.writeToStdin(tab.activeRequestId, msg)
   }
 
-  respondToUserQuestion(tabId: string, answer: string): boolean {
+  respondToUserQuestion(payload: AskUserQuestionResolvePayload): boolean {
+    const tabId = payload.tabId
     const tab = this.tabs.get(tabId)
     if (!tab?.activeRequestId) return false
-    return this.runManager.writeToStdin(tab.activeRequestId, {
+    const requestId = tab.activeRequestId
+    let result: ResolvedAskUserQuestion | null
+    try {
+      result = this.askUserQuestionHarness.resolve({ ...payload, requestId })
+    } catch (err) {
+      log(`respondToUserQuestion failed: ${(err as Error).message}`)
+      return false
+    }
+    if (!result) return false
+    const writeMessage = (message: object): boolean => {
+      if (this.ptyRuns.has(requestId)) {
+        return this.ptyRunManager.writeToStdin(requestId, JSON.stringify(message) + '\n')
+      }
+      return this.runManager.writeToStdin(requestId, message)
+    }
+    if (result.toolUseId) {
+      const success = writeMessage({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: result.toolUseId,
+            content: result.content,
+          }],
+        },
+      })
+      if (success) this.askUserQuestionHarness.complete(tabId, payload.questionId)
+      return success
+    }
+    const success = writeMessage({
       type: 'user',
       message: {
         role: 'user',
-        content: [{ type: 'text', text: answer }],
+        content: [{ type: 'text', text: result.content }],
       },
     })
+    if (success) this.askUserQuestionHarness.complete(tabId, payload.questionId)
+    return success
   }
 
   // ─── Health ───

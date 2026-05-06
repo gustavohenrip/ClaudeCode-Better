@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getCodexModelOptions, getEffectiveModelId } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -194,7 +194,7 @@ export function InputBar() {
           addSystemMessage(`OpenRouter model: ${current}\n\nConfigure in Settings → OpenRouter.`)
           break
         }
-        const models = tab?.provider === 'codex' ? CODEX_MODELS : AVAILABLE_MODELS
+        const models = tab?.provider === 'codex' ? getCodexModelOptions(preferredCodexModel || tab?.sessionModel || null) : AVAILABLE_MODELS
         const model = tab?.sessionModel || null
         const version = tab?.sessionVersion || staticInfo?.version || null
         const current = tab?.provider === 'codex'
@@ -300,7 +300,7 @@ export function InputBar() {
         return
       }
       const query = modelMatch[1].toLowerCase()
-      const models = isCodexTab ? CODEX_MODELS : AVAILABLE_MODELS
+      const models = isCodexTab ? getCodexModelOptions(preferredCodexModel || tab?.sessionModel || null) : AVAILABLE_MODELS
       const match = models.find((m: { id: string; label: string }) =>
         m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
       )

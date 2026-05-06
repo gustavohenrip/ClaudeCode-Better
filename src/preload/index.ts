@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, CodexQuota } from '../shared/types'
+import type { AskUserQuestionAnswer, RunOptions, NormalizedEvent, HealthReport, EnrichedError, Attachment, SessionMeta, CatalogPlugin, SessionLoadMessage, CodexQuota } from '../shared/types'
 
 export interface CluiAPI {
   // ─── Request-response (renderer → main) ───
@@ -23,7 +23,7 @@ export interface CluiAPI {
   transcribeAudio(audioBase64: string): Promise<{ error: string | null; transcript: string | null }>
   getDiagnostics(): Promise<any>
   respondPermission(tabId: string, questionId: string, optionId: string): Promise<boolean>
-  respondUserQuestion(payload: { tabId: string; questionId: string; selectedIds: string[]; otherText?: string; answerText: string }): Promise<boolean>
+  respondUserQuestion(payload: { tabId: string; questionId: string; selectedIds?: string[]; otherText?: string; answerText?: string; answers?: AskUserQuestionAnswer[]; cancelled?: boolean }): Promise<boolean>
   initSession(tabId: string, systemPrompt?: string): void
   resetTabSession(tabId: string): void
   listSessions(projectPath?: string, provider?: string): Promise<SessionMeta[]>

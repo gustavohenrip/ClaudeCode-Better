@@ -246,6 +246,7 @@ export interface PtyRunHandle {
   permissionPhase: 'idle' | 'detecting' | 'waiting_user' | 'answered'
   /** Rolling window of cleaned lines for parser context */
   ptyBuffer: string[]
+  sensitiveOutput: boolean
   /** Timer for permission timeout */
   permissionTimeout: ReturnType<typeof setTimeout> | null
   /** Accumulated text since last flush (for debounced text_chunk emission) */
@@ -433,6 +434,7 @@ export class PtyRunManager extends EventEmitter {
       pendingPermission: null,
       permissionPhase: 'idle',
       ptyBuffer: [],
+      sensitiveOutput: false,
       permissionTimeout: null,
       textAccumulator: '',
       pastInit: false,
@@ -553,6 +555,18 @@ export class PtyRunManager extends EventEmitter {
   private _processLine(requestId: string, handle: PtyRunHandle, rawLine: string): void {
     const cleaned = stripAnsi(rawLine).trim()
     if (cleaned.length === 0) return
+
+    if (/tool_result|User has answered your questions|User declined to answer questions/i.test(cleaned)) {
+      handle.sensitiveOutput = true
+      log(`PTY line [${requestId}]: [redacted user response output]`)
+      return
+    }
+
+    if (handle.sensitiveOutput) {
+      handle.sensitiveOutput = false
+      log(`PTY line [${requestId}]: [redacted adjacent user response output]`)
+      return
+    }
 
     // Ignore terminal mode toggles and redraw control fragments.
     if (/^(?:\?[0-9;?]*[a-zA-Z])+$/i.test(cleaned)) return
@@ -892,7 +906,17 @@ export class PtyRunManager extends EventEmitter {
     const handle = this.activeRuns.get(requestId)
     if (!handle) return false
 
-    log(`Writing to PTY stdin [${requestId}]: ${message.substring(0, 200)}`)
+    let summary = message.substring(0, 80)
+    try {
+      const parsed = JSON.parse(message)
+      if (parsed?.type === 'user') {
+        const content = Array.isArray(parsed.message?.content) ? parsed.message.content : []
+        summary = `type=user blocks=${content.map((block: any) => block?.type || 'unknown').join(',') || 'none'}`
+      } else if (parsed?.type) {
+        summary = `type=${parsed.type}`
+      }
+    } catch {}
+    log(`Writing to PTY stdin [${requestId}]: ${summary}`)
     try {
       handle.pty.write(message)
       return true

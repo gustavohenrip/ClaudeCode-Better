@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, Provider, OpenRouterConfig, AskUserQuestionPayload } from '../../shared/types'
+import type { AskUserQuestionAnswer, AskUserQuestionItem, TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus, Provider, OpenRouterConfig, AskUserQuestionPayload } from '../../shared/types'
 import { useThemeStore, type EffortLevel } from '../theme'
 
 const notificationSrc = new URL('../../../resources/notification.mp3', import.meta.url).href
@@ -7,28 +7,37 @@ const notificationSrc = new URL('../../../resources/notification.mp3', import.me
 // ─── Known models ───
 
 export const AVAILABLE_MODELS = [
-  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
 ] as const
 
 export const CODEX_MODELS = [
+  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
   { id: 'gpt-5.5', label: 'GPT-5.5' },
   { id: 'gpt-5.4', label: 'GPT-5.4' },
   { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-  { id: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
-  { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
-  { id: 'gpt-5.2', label: 'GPT-5.2' },
+  { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano' },
 ] as const
 
 export const DEFAULT_CODEX_MODEL_ID = CODEX_MODELS[0].id
+type ModelOption = { id: string; label: string }
 
 export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh'
 
-export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-6'])
+export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-7', 'claude-opus-4-6'])
 
 export function getEffectiveModelId(preferredModel: string | null): string {
   return preferredModel ?? AVAILABLE_MODELS[0].id
+}
+
+export function getCodexModelOptions(currentModel?: string | null): ModelOption[] {
+  if (!currentModel || CODEX_MODELS.some((model) => model.id === currentModel)) {
+    return [...CODEX_MODELS]
+  }
+  return [...CODEX_MODELS, { id: currentModel, label: `${currentModel} (saved)` }]
 }
 
 const SESSION_SETTINGS_KEY = 'clui-session-settings'
@@ -145,7 +154,7 @@ interface State {
   addSystemMessage: (content: string) => void
   sendMessage: (prompt: string, projectPath?: string) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
-  respondUserQuestion: (tabId: string, questionId: string, selectedIds: string[], otherText: string | undefined, answerText: string) => Promise<boolean>
+  respondUserQuestion: (tabId: string, questionId: string, answers: AskUserQuestionAnswer[], selectedIds?: string[], otherText?: string, answerText?: string, cancelled?: boolean) => Promise<boolean>
   addDirectory: (dir: string) => void
   removeDirectory: (dir: string) => void
   setBaseDirectory: (dir: string) => void
@@ -226,7 +235,8 @@ function toQuestionOptions(raw: unknown): AskUserQuestionPayload['options'] {
     const label = String(labelValue).trim()
     if (!label) return []
     const description = typeof source.description === 'string' ? source.description : undefined
-    return [{ id: makeId(idValue), label, description }]
+    const preview = typeof source.preview === 'string' ? source.preview : undefined
+    return [{ id: makeId(idValue), label, description, preview }]
   })
 }
 
@@ -247,7 +257,7 @@ function toAskUserQuestions(parsed: unknown, tool: Message): AskUserQuestionPayl
         ? [source]
         : []
   const baseId = tool.toolId || tool.id
-  return rawQuestions.flatMap((raw, index) => {
+  const questions = rawQuestions.flatMap((raw, index) => {
     if (!raw || typeof raw !== 'object') return []
     const q = raw as Record<string, unknown>
     const questionValue = q.question ?? q.prompt ?? q.text ?? q.message
@@ -257,15 +267,28 @@ function toAskUserQuestions(parsed: unknown, tool: Message): AskUserQuestionPayl
       : typeof q.title === 'string'
         ? q.title
         : undefined
+    const id = `${baseId}-${index}`
     return [{
-      questionId: `${baseId}-${index}`,
+      id,
       question: questionValue.trim(),
       header,
       options: toQuestionOptions(q.options),
       multiSelect: boolFromQuestion(q, ['multiSelect', 'multi_select', 'multiple', 'multipleSelect'], false),
       allowOtherText: boolFromQuestion(q, ['allowOtherText', 'allow_other_text', 'allowCustom'], true),
     }]
-  })
+  }) satisfies AskUserQuestionItem[]
+  if (questions.length === 0) return []
+  const first = questions[0]
+  return [{
+    questionId: baseId,
+    toolUseId: tool.toolId,
+    question: first.question,
+    header: first.header,
+    options: first.options,
+    multiSelect: first.multiSelect,
+    allowOtherText: first.allowOtherText,
+    questions,
+  }]
 }
 
 function appendAskUserQuestions(existing: AskUserQuestionPayload[], incoming: AskUserQuestionPayload[]): AskUserQuestionPayload[] {
@@ -768,8 +791,8 @@ export const useSessionStore = create<State>((set, get) => ({
 
   // ─── Ask User Question response ───
 
-  respondUserQuestion: async (tabId, questionId, selectedIds, otherText, answerText) => {
-    const payload = { tabId, questionId, selectedIds, otherText, answerText }
+  respondUserQuestion: async (tabId, questionId, answers, selectedIds = [], otherText, answerText, cancelled = false) => {
+    const payload = { tabId, questionId, selectedIds, otherText, answerText, answers, cancelled }
     try {
       const success = await window.clui.respondUserQuestion(payload)
       if (!success) return false
@@ -1256,17 +1279,32 @@ export const useSessionStore = create<State>((set, get) => ({
           }
 
           case 'ask_user_question': {
+            const questions = event.questions && event.questions.length > 0
+              ? event.questions
+              : [{
+                  id: event.questionId,
+                  question: event.question,
+                  header: event.header,
+                  options: event.options.map((o) => ({
+                    id: o.id,
+                    label: o.label,
+                    description: o.description,
+                    preview: o.preview,
+                  })),
+                  multiSelect: event.multiSelect,
+                  allowOtherText: event.allowOtherText ?? true,
+                }]
+            const first = questions[0]
             const q: AskUserQuestionPayload = {
               questionId: event.questionId,
-              question: event.question,
-              header: event.header,
-              options: event.options.map((o) => ({
-                id: o.id,
-                label: o.label,
-                description: o.description,
-              })),
-              multiSelect: event.multiSelect,
-              allowOtherText: event.allowOtherText ?? true,
+              toolUseId: event.toolUseId,
+              question: first.question,
+              header: first.header,
+              options: first.options,
+              multiSelect: first.multiSelect,
+              allowOtherText: first.allowOtherText,
+              questions,
+              validationError: event.validationError,
             }
             updated.askUserQuestions = appendAskUserQuestions(updated.askUserQuestions, [q])
             updated.currentActivity = `Waiting for response...`

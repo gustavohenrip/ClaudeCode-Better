@@ -147,16 +147,38 @@ export interface AskUserQuestionOption {
   id: string
   label: string
   description?: string
+  preview?: string
   isError?: boolean
 }
 
-export interface AskUserQuestionPayload {
-  questionId: string
+export interface AskUserQuestionItem {
+  id: string
   question: string
   header?: string
   options: AskUserQuestionOption[]
   multiSelect: boolean
   allowOtherText: boolean
+}
+
+export interface AskUserQuestionPayload {
+  questionId: string
+  toolUseId?: string
+  question: string
+  header?: string
+  options: AskUserQuestionOption[]
+  multiSelect: boolean
+  allowOtherText: boolean
+  questions?: AskUserQuestionItem[]
+  validationError?: string
+}
+
+export interface AskUserQuestionAnswer {
+  questionId: string
+  question: string
+  selectedIds: string[]
+  selectedLabels: string[]
+  otherText?: string
+  answerText: string
 }
 
 export interface Attachment {
@@ -247,7 +269,7 @@ export type NormalizedEvent =
   | { type: 'codex_rate_limits'; rateLimits: Record<string, unknown> }
   | { type: 'usage'; usage: UsageData }
   | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
-  | { type: 'ask_user_question'; questionId: string; question: string; header?: string; options: Array<{ id: string; label: string; description?: string }>; multiSelect: boolean; allowOtherText?: boolean }
+  | { type: 'ask_user_question'; questionId: string; toolUseId?: string; question: string; header?: string; options: Array<{ id: string; label: string; description?: string; preview?: string }>; multiSelect: boolean; allowOtherText?: boolean; questions?: AskUserQuestionItem[]; validationError?: string }
   | { type: 'compact_complete'; clearedTokens: number }
 
 // ─── Run Options ───
