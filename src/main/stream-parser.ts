@@ -2,6 +2,8 @@ import { Readable } from 'stream'
 import { EventEmitter } from 'events'
 import type { ClaudeEvent } from '../shared/types'
 
+const MAX_BUFFER = 64 * 1024 * 1024
+
 /**
  * Parses NDJSON output from `claude -p --output-format stream-json`.
  * Each line is a JSON object. Unknown event types are emitted but never crash.
@@ -15,6 +17,11 @@ export class StreamParser extends EventEmitter {
    */
   feed(chunk: string): void {
     this.buffer += chunk
+    if (this.buffer.length > MAX_BUFFER && this.buffer.indexOf('\n') === -1) {
+      this.emit('parse-error', this.buffer.slice(0, 200))
+      this.buffer = ''
+      return
+    }
     const lines = this.buffer.split('\n')
     // Keep the last (possibly incomplete) line in the buffer
     this.buffer = lines.pop() || ''
@@ -54,8 +61,11 @@ export class StreamParser extends EventEmitter {
   static fromStream(stream: Readable): StreamParser {
     const parser = new StreamParser()
     stream.setEncoding('utf-8')
+    let flushed = false
+    const doFlush = () => { if (!flushed) { flushed = true; parser.flush() } }
     stream.on('data', (chunk: string) => parser.feed(chunk))
-    stream.on('end', () => parser.flush())
+    stream.on('end', doFlush)
+    stream.on('close', doFlush)
     return parser
   }
 }

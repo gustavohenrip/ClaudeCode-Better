@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
+import { Microphone, ArrowUp, SpinnerGap, X, Check, Square } from '@phosphor-icons/react'
 import { useSessionStore, useActiveTab, AVAILABLE_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getCodexModelOptions, getEffectiveModelId } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
 import { SlashCommandMenu, getFilteredCommandsWithExtras, SLASH_COMMANDS, type SlashCommand } from './SlashCommandMenu'
@@ -553,6 +553,24 @@ export function InputBar() {
                 onStop={stopRecording}
               />
               <AnimatePresence>
+                {isBusy && voiceState !== 'recording' && (
+                  <motion.div key="stop" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
+                    <motion.button
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => activeTabId && window.clui.stopTab(activeTabId)}
+                      className="w-9 h-9 rounded-full flex items-center justify-center"
+                      style={{ background: colors.stopBg, color: '#fff' }}
+                      title="Stop generating"
+                      whileHover={{ scale: 1.08 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                    >
+                      <Square size={13} weight="fill" />
+                    </motion.button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              <AnimatePresence>
                 {canSend && voiceState !== 'recording' && (
                   <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
                     <motion.button
@@ -613,6 +631,24 @@ export function InputBar() {
                 onCancel={cancelRecording}
                 onStop={stopRecording}
               />
+              <AnimatePresence>
+                {isBusy && voiceState !== 'recording' && (
+                  <motion.div key="stop" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
+                    <motion.button
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => activeTabId && window.clui.stopTab(activeTabId)}
+                      className="w-9 h-9 rounded-full flex items-center justify-center"
+                      style={{ background: colors.stopBg, color: '#fff' }}
+                      title="Stop generating"
+                      whileHover={{ scale: 1.08 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: 'spring', stiffness: 400, damping: 20 }}
+                    >
+                      <Square size={13} weight="fill" />
+                    </motion.button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <AnimatePresence>
                 {canSend && voiceState !== 'recording' && (
                   <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>

@@ -102,7 +102,7 @@ export interface ResultEvent {
     cache_read_input_tokens?: number
     cache_creation_input_tokens?: number
   }
-  permission_denials: string[]
+  permission_denials: Array<{ tool_name: string; tool_use_id: string }>
   uuid: string
 }
 
@@ -242,6 +242,7 @@ export interface Message {
   toolIndex?: number
   toolInput?: string
   toolStatus?: 'running' | 'completed' | 'error'
+  toolResult?: string
   streamId?: string
   timestamp: number
   attachments?: Attachment[]
@@ -264,6 +265,7 @@ export type NormalizedEvent =
   | { type: 'tool_call'; toolName: string; toolId: string; index: number }
   | { type: 'tool_call_update'; toolId: string; partialInput: string; index?: number; updateMode?: 'append' | 'replace' }
   | { type: 'tool_call_complete'; index: number; toolId?: string }
+  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean }
   | { type: 'task_update'; message: AssistantMessagePayload }
   | { type: 'task_complete'; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }
   | { type: 'error'; message: string; isError: boolean; sessionId?: string }

@@ -207,15 +207,15 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
           background: colors.containerBg,
           border: `1px solid ${colors.accentSoft}`,
           borderRadius: 12,
-          boxShadow: `0 4px 20px ${colors.accentSoft}15`,
+          boxShadow: `0 4px 20px ${colors.accentSoft}`,
         }}
         className="overflow-hidden"
       >
         <div
           className="flex items-center justify-between gap-2 px-3 py-1.5"
           style={{
-            background: `${colors.accentSoft}18`,
-            borderBottom: `1px solid ${colors.accentSoft}40`,
+            background: colors.accentLight,
+            borderBottom: `1px solid ${colors.accentBorder}`,
           }}
         >
           <div className="flex items-center gap-1.5 min-w-0">
@@ -262,7 +262,7 @@ export function AskUserQuestionCard({ tabId, question, queueLength = 1 }: Props)
                     aria-pressed={isSelected}
                     className="text-[11px] font-medium px-3 py-2 rounded-lg text-left transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{
-                      background: isSelected ? `${colors.accent}20` : `${colors.surfaceHover}80`,
+                      background: isSelected ? `${colors.accent}20` : colors.surfaceHover,
                       color: isSelected ? colors.accent : colors.textPrimary,
                       border: `1px solid ${isSelected ? colors.accent + '60' : colors.toolBorder + '60'}`,
                     }}

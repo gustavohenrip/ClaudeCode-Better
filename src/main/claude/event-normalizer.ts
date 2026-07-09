@@ -13,23 +13,27 @@ import { hasUsageData, normalizeUsageData } from '../../shared/usage'
 import { normalizeAskUserQuestionToolInput } from '../native-harness/ask-user-question'
 import { getNativeToolNames } from '../native-harness/tool-registry'
 
-/**
- * Maps raw Claude stream-json events to canonical CLUI events.
- *
- * The normalizer is stateless — it takes one raw event and returns
- * zero or more normalized events. The caller (RunManager) is responsible
- * for sequencing and routing.
- */
-export function normalize(raw: ClaudeEvent): NormalizedEvent[] {
+export interface NormalizerState {
+  blockToolIds: Map<number, string>
+}
+
+export function createNormalizerState(): NormalizerState {
+  return { blockToolIds: new Map() }
+}
+
+export function normalize(raw: ClaudeEvent, state?: NormalizerState): NormalizedEvent[] {
   switch (raw.type) {
     case 'system':
       return normalizeSystem(raw as InitEvent)
 
     case 'stream_event':
-      return normalizeStreamEvent(raw as StreamEvent)
+      return normalizeStreamEvent(raw as StreamEvent, state)
 
     case 'assistant':
       return normalizeAssistant(raw as AssistantEvent)
+
+    case 'user':
+      return normalizeUser(raw as any)
 
     case 'result':
       return normalizeResult(raw as ResultEvent)
@@ -41,9 +45,43 @@ export function normalize(raw: ClaudeEvent): NormalizedEvent[] {
       return normalizePermission(raw as PermissionEvent)
 
     default:
-      // Unknown event type — skip silently (defensive)
       return []
   }
+}
+
+function normalizeUser(event: any): NormalizedEvent[] {
+  const content = event?.message?.content
+  if (!Array.isArray(content)) return []
+  const out: NormalizedEvent[] = []
+  for (const block of content) {
+    if (!block || block.type !== 'tool_result') continue
+    const toolUseId = block.tool_use_id || ''
+    if (!toolUseId) continue
+    out.push({
+      type: 'tool_result',
+      toolUseId,
+      content: stringifyToolResultContent(block.content),
+      isError: block.is_error === true,
+    })
+  }
+  return out
+}
+
+function stringifyToolResultContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((b: any) => {
+        if (typeof b === 'string') return b
+        if (b?.type === 'text' && typeof b.text === 'string') return b.text
+        if (b?.type === 'image') return '[image]'
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (content === null || content === undefined) return ''
+  try { return JSON.stringify(content) } catch { return String(content) }
 }
 
 function normalizeSystem(event: InitEvent): NormalizedEvent[] {
@@ -60,7 +98,7 @@ function normalizeSystem(event: InitEvent): NormalizedEvent[] {
   }]
 }
 
-function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
+function normalizeStreamEvent(event: StreamEvent, state?: NormalizerState): NormalizedEvent[] {
   const sub = event.event
   if (!sub) return []
 
@@ -73,6 +111,7 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
           toolId: sub.content_block.id || '',
           index: sub.index,
         }
+        if (state && sub.content_block.id) state.blockToolIds.set(sub.index, sub.content_block.id)
         if (isAskUserQuestionTool(sub.content_block)) {
           const event = normalizeAskUserQuestionToolInput(sub.content_block.input, sub.content_block.id || '')
           return event ? [toolCall, event] : [toolCall]
@@ -91,7 +130,7 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
       if (delta.type === 'input_json_delta') {
         return [{
           type: 'tool_call_update',
-          toolId: '',
+          toolId: state?.blockToolIds.get(sub.index) || '',
           partialInput: delta.partial_json,
           index: sub.index,
         }]
@@ -106,10 +145,14 @@ function normalizeStreamEvent(event: StreamEvent): NormalizedEvent[] {
       return [{
         type: 'tool_call_complete',
         index: sub.index,
+        toolId: state?.blockToolIds.get(sub.index),
       }]
     }
 
     case 'message_start':
+      if (state) state.blockToolIds.clear()
+      return []
+
     case 'message_stop':
       return []
 
@@ -560,7 +603,10 @@ function normalizeCodexItemCompleted(item: any): NormalizedEvent[] {
           events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: json })
         }
       } else if (input) {
-        events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: input })
+        events.push({ type: 'tool_call_update', toolId: item.id || '', partialInput: input, updateMode: 'replace' })
+      }
+      if (item.aggregated_output) {
+        events.push({ type: 'tool_result', toolUseId: item.id || '', content: String(item.aggregated_output), isError: typeof item.exit_code === 'number' ? item.exit_code !== 0 : false })
       }
       events.push({ type: 'tool_call_complete', index: 0, toolId: item.id || '' })
       return events

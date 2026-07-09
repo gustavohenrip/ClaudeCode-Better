@@ -6,7 +6,8 @@ import remarkGfm from 'remark-gfm'
 import {
   FileText, PencilSimple, FileArrowUp, Terminal, MagnifyingGlass, Globe,
   Robot, Question, Wrench, FolderOpen, Copy, Check, CaretRight, CaretDown,
-  SpinnerGap, ArrowCounterClockwise, Square, Brain,
+  SpinnerGap, ArrowCounterClockwise, Square, Brain, ListChecks, ClipboardText,
+  Sparkle, Plugs,
 } from '@phosphor-icons/react'
 import { useSessionStore, useActiveTab } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -93,7 +94,7 @@ export function ConversationView() {
   const lastMsg = tab?.messages[tab.messages.length - 1]
   const permissionQueueLen = tab?.permissionQueue?.length ?? 0
   const queuedCount = tab?.queuedPrompts?.length ?? 0
-  const scrollTrigger = `${msgCount}:${lastMsg?.content?.length ?? 0}:${permissionQueueLen}:${queuedCount}`
+  const scrollTrigger = `${msgCount}:${lastMsg?.content?.length ?? 0}:${lastMsg?.toolInput?.length ?? 0}:${lastMsg?.toolResult?.length ?? 0}:${lastMsg?.toolStatus ?? ''}:${permissionQueueLen}:${queuedCount}`
 
   useEffect(() => {
     if (isNearBottomRef.current && scrollRef.current) {
@@ -263,7 +264,7 @@ export function ConversationView() {
           height: 28,
           minHeight: 28,
           marginTop: -28,
-          background: colors.containerBg,
+          background: `linear-gradient(to bottom, transparent, ${colors.containerBg} 60%)`,
           zIndex: 2,
           pointerEvents: 'none',
         }}
@@ -325,20 +326,34 @@ function EmptyState() {
 
   return (
     <div
-      className="flex flex-col items-center justify-center px-4 py-3 gap-1.5"
-      style={{ minHeight: 80 }}
+      className="flex flex-col items-center justify-center px-4 py-6 gap-2.5"
+      style={{ minHeight: 140 }}
     >
+      <div
+        className="w-10 h-10 rounded-2xl flex items-center justify-center"
+        style={{ background: colors.accentLight, border: `1px solid ${colors.accentBorder}` }}
+      >
+        <Sparkle size={18} weight="fill" style={{ color: colors.accent }} />
+      </div>
+      <div className="text-center">
+        <div className="text-[13px] font-semibold" style={{ color: colors.textPrimary }}>
+          Ready when you are
+        </div>
+        <div className="text-[11px] mt-0.5" style={{ color: colors.textTertiary }}>
+          Pick a folder to start coding with Claude
+        </div>
+      </div>
       <button
         onClick={handleChooseFolder}
-        className="flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg transition-colors"
+        className="flex items-center gap-1.5 text-[12px] px-3.5 py-1.5 rounded-lg transition-colors"
         style={{
-          color: colors.accent,
-          background: colors.surfaceHover,
+          color: colors.textOnAccent,
+          background: colors.accent,
           border: 'none',
           cursor: 'pointer',
         }}
       >
-        <FolderOpen size={13} />
+        <FolderOpen size={13} weight="bold" />
         Choose folder
       </button>
       <span className="text-[11px]" style={{ color: colors.textTertiary }}>
@@ -767,6 +782,10 @@ function toolSummary(tools: Message[]): string {
 
 /** Short human-readable description from tool name + input */
 function getToolDescription(name: string, input?: string): string {
+  if (name.startsWith('mcp__')) {
+    const parts = name.split('__')
+    return `${parts[1] || 'mcp'} · ${parts.slice(2).join('__') || 'tool'}`
+  }
   if (!input) return name
 
   // Try to extract a meaningful short description from the input JSON
@@ -775,6 +794,8 @@ function getToolDescription(name: string, input?: string): string {
     switch (name) {
       case 'Read': return `Read ${parsed.file_path || parsed.path || 'file'}`
       case 'Edit': return `Edit ${parsed.file_path || 'file'}`
+      case 'MultiEdit': return `Edit ${parsed.file_path || 'file'}`
+      case 'NotebookEdit': return `Edit ${parsed.notebook_path || parsed.file_path || 'notebook'}`
       case 'Write': return `Write ${parsed.file_path || 'file'}`
       case 'Glob': return `Search files: ${parsed.pattern || ''}`
       case 'Grep': return `Search: ${parsed.pattern || ''}`
@@ -784,7 +805,14 @@ function getToolDescription(name: string, input?: string): string {
       }
       case 'WebSearch': return `Search: ${parsed.query || parsed.search_query || ''}`
       case 'WebFetch': return `Fetch: ${parsed.url || ''}`
-      case 'Agent': return `Agent: ${(parsed.prompt || parsed.description || '').substring(0, 50)}`
+      case 'Agent':
+      case 'Task': return `Task: ${String(parsed.description || parsed.subagent_type || parsed.prompt || '').substring(0, 50)}`
+      case 'LS': return `List ${parsed.path || parsed.dir || 'directory'}`
+      case 'TodoWrite': return `Update todos${Array.isArray(parsed.todos) ? ` (${parsed.todos.length})` : ''}`
+      case 'ExitPlanMode': return 'Plan ready for review'
+      case 'Skill': return `Skill: ${parsed.command || parsed.name || ''}`
+      case 'BashOutput': return 'Read shell output'
+      case 'KillShell': return 'Kill shell'
       default: return name
     }
   } catch {
@@ -795,9 +823,124 @@ function getToolDescription(name: string, input?: string): string {
   }
 }
 
+function ToolResultView({ result, isError }: { result: string; isError: boolean }) {
+  const colors = useColors()
+  const [showAll, setShowAll] = useState(false)
+  const trimmed = result.replace(/\s+$/, '')
+  if (!trimmed) {
+    if (!isError) return null
+    return (
+      <span className="inline-block text-[10px] mt-1 px-1.5 py-[1px] rounded" style={{ background: colors.statusErrorBg, color: colors.statusError }}>
+        failed
+      </span>
+    )
+  }
+  const lines = trimmed.split('\n')
+  const LIMIT = 16
+  const truncated = !showAll && lines.length > LIMIT
+  const shown = truncated ? lines.slice(0, LIMIT).join('\n') : trimmed
+
+  return (
+    <div className="mt-1.5 rounded-md overflow-hidden" style={{ border: `1px solid ${isError ? colors.statusError : colors.toolBorder}` }}>
+      <pre
+        className="font-mono text-[11px] leading-[1.55] px-2 py-1.5 overflow-x-auto"
+        style={{ background: colors.codeBg, color: isError ? colors.statusError : colors.textSecondary, whiteSpace: 'pre', maxHeight: showAll ? undefined : 320, margin: 0 }}
+      >
+        {shown}
+      </pre>
+      {truncated && (
+        <div
+          className="px-2 py-1 text-[10px] cursor-pointer text-center"
+          style={{ color: colors.textTertiary, background: colors.surfaceHover, borderTop: `1px solid ${colors.toolBorder}` }}
+          onClick={() => setShowAll(true)}
+        >
+          Show {lines.length - LIMIT} more line{lines.length - LIMIT > 1 ? 's' : ''}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TodoChecklist({ input }: { input: string }) {
+  const colors = useColors()
+  const todos = useMemo(() => {
+    try {
+      const p = JSON.parse(input)
+      return Array.isArray(p.todos) ? p.todos : []
+    } catch { return [] }
+  }, [input])
+  if (todos.length === 0) return null
+  return (
+    <div className="mt-1.5 rounded-md px-2 py-1.5 space-y-1" style={{ border: `1px solid ${colors.toolBorder}`, background: colors.surfaceHover }}>
+      {todos.map((t: any, i: number) => {
+        const status = t.status || 'pending'
+        const text = status === 'in_progress' && t.activeForm ? t.activeForm : (t.content || t.activeForm || '')
+        const color = status === 'completed' ? colors.statusComplete : status === 'in_progress' ? colors.statusRunning : colors.textTertiary
+        return (
+          <div key={i} className="flex items-start gap-1.5 text-[11px] leading-[1.45]">
+            <span className="flex-shrink-0 mt-[1px]" style={{ color }}>
+              {status === 'completed'
+                ? <Check size={11} weight="bold" />
+                : status === 'in_progress'
+                  ? <SpinnerGap size={11} className="animate-spin" />
+                  : <CaretRight size={9} />}
+            </span>
+            <span style={{ color: status === 'completed' ? colors.textTertiary : colors.textSecondary, textDecoration: status === 'completed' ? 'line-through' : 'none' }}>
+              {text}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function PlanCard({ plan }: { plan: string }) {
+  const colors = useColors()
+  return (
+    <div className="mt-1.5 rounded-md px-2.5 py-1.5 prose-cloud" style={{ border: `1px solid ${colors.accentBorder}`, background: colors.accentLight }}>
+      <Markdown remarkPlugins={REMARK_PLUGINS}>{plan}</Markdown>
+    </div>
+  )
+}
+
+function ToolBody({ tool }: { tool: Message }) {
+  const colors = useColors()
+  const toolName = tool.toolName || 'Tool'
+  const isError = tool.toolStatus === 'error'
+  const isDiff = toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit' || toolName === 'NotebookEdit'
+
+  if (toolName === 'TodoWrite' && tool.toolInput) {
+    return <TodoChecklist input={tool.toolInput} />
+  }
+  if (toolName === 'ExitPlanMode' && tool.toolInput) {
+    let plan: unknown = null
+    try { plan = JSON.parse(tool.toolInput).plan } catch { plan = null }
+    if (typeof plan === 'string' && plan.trim()) return <PlanCard plan={plan} />
+  }
+
+  return (
+    <>
+      {isDiff && !isError && tool.toolInput && <DiffViewer toolName={toolName} toolInput={tool.toolInput} />}
+      {isDiff && isError && tool.toolResult && <ToolResultView result={tool.toolResult} isError />}
+      {!isDiff && tool.toolResult && <ToolResultView result={tool.toolResult} isError={isError} />}
+      {!isDiff && !tool.toolResult && isError && (
+        <span className="inline-block text-[10px] mt-1 px-1.5 py-[1px] rounded" style={{ background: colors.statusErrorBg, color: colors.statusError }}>
+          failed
+        </span>
+      )}
+      {!isDiff && !tool.toolResult && !isError && (
+        <span className="inline-flex items-center gap-1 text-[10px] mt-1" style={{ color: colors.statusComplete }}>
+          <Check size={10} weight="bold" /> done
+        </span>
+      )}
+    </>
+  )
+}
+
 function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boolean }) {
   const hasRunning = tools.some((t) => t.toolStatus === 'running')
-  const hasDiffTool = tools.some((t) => t.toolName === 'Edit' || t.toolName === 'Write')
+  const hasDiffTool = tools.some((t) => t.toolName === 'Edit' || t.toolName === 'Write' || t.toolName === 'MultiEdit' || t.toolName === 'NotebookEdit')
   const [expanded, setExpanded] = useState(() => hasDiffTool)
   const colors = useColors()
 
@@ -853,28 +996,13 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
                       {desc}
                     </span>
 
-                    {!isRunning && (
-                      <span
-                        className="inline-block text-[10px] mt-0.5 px-1.5 py-[1px] rounded"
-                        style={{
-                          background: tool.toolStatus === 'error' ? colors.statusErrorBg : colors.surfaceHover,
-                          color: tool.toolStatus === 'error' ? colors.statusError : colors.textTertiary,
-                        }}
-                      >
-                        Result
-                      </span>
-                    )}
-
                     {isRunning && (
                       <span className="text-[10px] mt-0.5 block" style={{ color: colors.textTertiary }}>
                         running…
                       </span>
                     )}
 
-                    {!isRunning && tool.toolStatus !== 'error' && tool.toolInput &&
-                      (toolName === 'Edit' || toolName === 'Write') && (
-                      <DiffViewer toolName={toolName} toolInput={tool.toolInput} />
-                    )}
+                    {!isRunning && <ToolBody tool={tool} />}
                   </div>
                 </div>
               )
@@ -928,7 +1056,7 @@ function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boole
 }
 
 function ThinkingMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
   const colors = useColors()
 
   const inner = (
@@ -1019,6 +1147,8 @@ function ToolIcon({ name, size = 12 }: { name: string; size?: number }) {
   const ICONS: Record<string, React.ReactNode> = {
     Read: <FileText size={size} />,
     Edit: <PencilSimple size={size} />,
+    MultiEdit: <PencilSimple size={size} />,
+    NotebookEdit: <PencilSimple size={size} />,
     Write: <FileArrowUp size={size} />,
     Bash: <Terminal size={size} />,
     Glob: <FolderOpen size={size} />,
@@ -1026,12 +1156,18 @@ function ToolIcon({ name, size = 12 }: { name: string; size?: number }) {
     WebSearch: <Globe size={size} />,
     WebFetch: <Globe size={size} />,
     Agent: <Robot size={size} />,
+    Task: <Robot size={size} />,
+    LS: <FolderOpen size={size} />,
+    TodoWrite: <ListChecks size={size} />,
+    ExitPlanMode: <ClipboardText size={size} />,
+    Skill: <Sparkle size={size} />,
     AskUserQuestion: <Question size={size} />,
   }
 
+  const icon = name.startsWith('mcp__') ? <Plugs size={size} /> : (ICONS[name] || <Wrench size={size} />)
   return (
     <span className="flex items-center" style={{ color: colors.textTertiary }}>
-      {ICONS[name] || <Wrench size={size} />}
+      {icon}
     </span>
   )
 }

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Terminal, CaretDown, Check, FolderOpen, Plus, X, ShieldCheck, Lightning, Brain, Database, WarningCircle, ArrowCounterClockwise } from '@phosphor-icons/react'
-import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getCodexModelOptions, getEffectiveModelId } from '../stores/sessionStore'
+import { useSessionStore, useActiveTab, AVAILABLE_MODELS, CODEX_MODELS, DEFAULT_CODEX_MODEL_ID, MODELS_SUPPORTING_MAX_EFFORT, getCodexModelOptions, getEffectiveModelId, getModelContextWindow } from '../stores/sessionStore'
 import { useCodexQuota } from '../hooks/useCodexQuota'
 import { usePopoverLayer } from './PopoverLayer'
 import { useColors, useThemeStore, type EffortLevel } from '../theme'
@@ -450,7 +450,7 @@ function TokenBadge() {
       <div
         className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5"
         style={{ color: colors.textTertiary }}
-        title="Tokens used this session"
+        title="Token usage (input = current context)"
       >
         <Database size={10} weight="regular" />
         <span>0 tokens</span>
@@ -462,11 +462,38 @@ function TokenBadge() {
     <div
       className="flex items-center gap-0.5 text-[10px] px-1.5 py-0.5"
       style={{ color: colors.textSecondary }}
-      title={`Input: ${formatExactTokenCount(input)} | Output: ${formatExactTokenCount(output)}\nReasoning: ${formatExactTokenCount(reasoning)} | Total: ${formatExactTokenCount(exactTotal || input + output)}\nCache read: ${formatExactTokenCount(cacheRead)} | Cache write: ${formatExactTokenCount(cacheCreation)}`}
+      title={`Context (current turn): ${formatExactTokenCount(input)} | Output (session): ${formatExactTokenCount(output)}\nReasoning: ${formatExactTokenCount(reasoning)}\nCache read: ${formatExactTokenCount(cacheRead)} | Cache write: ${formatExactTokenCount(cacheCreation)}`}
     >
       <Database size={10} weight="regular" />
       <span>{label}</span>
     </div>
+  )
+}
+
+function ContextBadge() {
+  const tab = useActiveTab()
+  const colors = useColors()
+  const usage = tab?.lastResult?.usage
+  const ctx = usage ? (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) : 0
+  if (ctx <= 0) return null
+  const windowSize = getModelContextWindow(tab?.sessionModel || null)
+  const pct = Math.min(100, Math.round((ctx / windowSize) * 100))
+  const barColor = pct >= 80 ? colors.statusError : pct >= 50 ? colors.accent : colors.statusComplete
+  return (
+    <>
+      <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
+      <div
+        className="flex items-center gap-1 text-[10px] px-1.5 py-0.5"
+        style={{ color: colors.textSecondary }}
+        title={`Context: ${formatExactTokenCount(ctx)} / ${formatExactTokenCount(windowSize)} (${pct}%)\nAuto-compact around 50%`}
+      >
+        <div style={{ position: 'relative', width: 34, height: 4, borderRadius: 2, background: colors.surfaceHover, overflow: 'hidden', flexShrink: 0 }}>
+          <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: barColor }} />
+          <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: colors.textTertiary, opacity: 0.5 }} />
+        </div>
+        <span>{formatTokenCount(ctx)}/{formatTokenCount(windowSize)}</span>
+      </div>
+    </>
   )
 }
 
@@ -615,7 +642,7 @@ export function StatusBar() {
       <div className="flex items-center gap-2 text-[11px] min-w-0" style={{ color: colors.textTertiary }}>
         <ProviderToggle />
 
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+        <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
 
         <button
           ref={dirRef}
@@ -712,29 +739,31 @@ export function StatusBar() {
           popoverLayer,
         )}
 
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+        <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
 
         <ModelPicker />
 
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+        <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
 
         <PermissionModePicker />
 
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+        <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
 
         {tab.provider === 'codex' ? (
           <ReasoningBadge />
         ) : (
           <>
             <EffortBadge />
-            <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+            <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
             <ThinkingBadge />
           </>
         )}
 
-        <span style={{ color: colors.textMuted, fontSize: 10 }}>|</span>
+        <span style={{ width: 1, height: 11, background: colors.containerBorder, flexShrink: 0 }} />
 
         <TokenBadge />
+
+        <ContextBadge />
 
         <RetryBadge />
       </div>

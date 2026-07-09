@@ -24,6 +24,7 @@ export const NATIVE_TOOL_REGISTRY: NativeToolDefinition[] = [
   { name: 'Write', category: 'filesystem', readOnly: false, requiresUserInteraction: false, concurrencySafe: false },
   { name: 'Edit', category: 'filesystem', readOnly: false, requiresUserInteraction: false, concurrencySafe: false },
   { name: 'MultiEdit', category: 'filesystem', readOnly: false, requiresUserInteraction: false, concurrencySafe: false },
+  { name: 'NotebookEdit', category: 'filesystem', readOnly: false, requiresUserInteraction: false, concurrencySafe: false },
   { name: 'Glob', category: 'search', readOnly: true, requiresUserInteraction: false, concurrencySafe: true },
   { name: 'Grep', category: 'search', readOnly: true, requiresUserInteraction: false, concurrencySafe: true },
   { name: 'LS', category: 'filesystem', readOnly: true, requiresUserInteraction: false, concurrencySafe: true },

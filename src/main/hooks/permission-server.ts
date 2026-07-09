@@ -20,14 +20,14 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { EventEmitter } from 'events'
-import { writeFileSync, mkdirSync, unlinkSync } from 'fs'
+import { existsSync, realpathSync, writeFileSync, mkdirSync, unlinkSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, isAbsolute, join, relative, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import { log as _log } from '../logger'
 import { getScreenToolsMcpConfig } from '../mcp/screen-tools-config'
 import { getComputerUseMcpConfig } from '../mcp/computer-use-config'
-const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
+const PERMISSION_TIMEOUT_MS = 295 * 1000
 const DEFAULT_PORT = 19836
 const MAX_BODY_SIZE = 1024 * 1024 // 1MB
 
@@ -37,7 +37,8 @@ const DEBUG = process.env.CLUI_DEBUG === '1'
 // This is the small set of tool classes that map to real, user-meaningful
 // approval moments. Routine internal agent mechanics (Read, Glob, Grep, etc.)
 // are auto-approved via --allowedTools to avoid noisy UX.
-const PERMISSION_REQUIRED_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit']
+const PERMISSION_REQUIRED_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']
+const FILE_PERMISSION_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 // Bash commands that are clearly read-only and safe to auto-approve.
 // Matches the leading command (before any pipes, semicolons, or &&).
@@ -53,9 +54,8 @@ const SAFE_BASH_COMMANDS = new Set([
   'git', // further checked: only read-only subcommands
   // Env / config
   'env', 'printenv', 'set',
-  // Package info (read-only)
-  'npm', 'yarn', 'pnpm', 'bun', 'cargo', 'pip', 'pip3', 'go', 'rustup',
-  'node', 'python', 'python3', 'ruby', 'java', 'javac',
+  // Package managers (read-only — mutating/exec subcommands gated below)
+  'npm', 'yarn', 'pnpm', 'bun',
   // Claude CLI (read-only subcommands)
   'claude',
   // Disk / system info
@@ -65,7 +65,7 @@ const SAFE_BASH_COMMANDS = new Set([
   'sw_vers', 'system_profiler', 'defaults', 'mdls', 'mdfind',
   // Diff / compare
   'diff', 'cmp', 'comm', 'sort', 'uniq', 'cut', 'awk', 'sed',
-  'jq', 'yq', 'xargs', 'tr',
+  'jq', 'yq', 'tr',
 ])
 
 // Git subcommands that mutate state (not safe to auto-approve)
@@ -86,6 +86,7 @@ function isSafeBashCommand(command: unknown): boolean {
   if (typeof command !== 'string') return false
   const trimmed = command.trim()
   if (!trimmed) return false
+  if (trimmed.includes('$(') || trimmed.includes('`')) return false
 
   // Extract the first command (before any chaining operators)
   // Split on ;, &&, ||, | and check each segment
@@ -131,6 +132,14 @@ function isSafeBashCommand(command: unknown): boolean {
       if (sub && ['install', 'i', 'add', 'remove', 'uninstall', 'publish', 'run', 'exec', 'dlx', 'npx', 'create', 'init', 'link', 'unlink', 'pack', 'deprecate'].includes(sub)) return false
     }
 
+    if (base === 'find' && parts.some((p) => ['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprintf', '-fls'].includes(p))) return false
+
+    if (base === 'sed' && parts.some((p) => /^-[a-zA-Z]*i/.test(p) || p.startsWith('--in-place'))) return false
+
+    if (base === 'sort' && parts.some((p) => p === '-o' || p === '--output' || p.startsWith('--output='))) return false
+
+    if (base === 'awk' && /system\s*\(/.test(segment)) return false
+
     // Block redirections that write to files
     if (segment.includes('>') && !segment.includes('>/dev/null') && !segment.includes('2>/dev/null') && !segment.includes('2>&1')) return false
   }
@@ -161,6 +170,51 @@ function extractDomain(url: unknown): string | null {
   } catch {
     return null
   }
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function normalizedPathKey(cwd: string, value: string): string {
+  const base = cwd && isAbsolute(cwd) ? cwd : process.cwd()
+  const resolved = resolve(base, value)
+  let current = resolved
+  while (!existsSync(current)) {
+    const parent = dirname(current)
+    if (parent === current) return resolved
+    current = parent
+  }
+  try {
+    const realBase = realpathSync(current)
+    const tail = relative(current, resolved)
+    return tail ? resolve(realBase, tail) : realBase
+  } catch {
+    return resolved
+  }
+}
+
+function extractToolPaths(toolName: string, input: Record<string, unknown> | undefined, cwd: string): string[] {
+  if (!input) return []
+  let rawPaths: string[] = []
+  if (toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit') {
+    const filePath = stringValue(input.file_path)
+    rawPaths = filePath ? [filePath] : []
+  } else if (toolName === 'NotebookEdit') {
+    const notebookPath = stringValue(input.notebook_path)
+    rawPaths = notebookPath ? [notebookPath] : []
+  }
+  return [...new Set(rawPaths.map((path) => normalizedPathKey(cwd, path)))]
+}
+
+function scopedAllowKeysForTool(toolRequest: HookToolRequest): string[] {
+  const sessionId = toolRequest.session_id
+  const toolName = toolRequest.tool_name
+  const paths = extractToolPaths(toolName, toolRequest.tool_input, toolRequest.cwd)
+  if (paths.length === 0) {
+    return FILE_PERMISSION_TOOLS.has(toolName) ? [] : [`session:${sessionId}:tool:${toolName}`]
+  }
+  return paths.map((path) => `session:${sessionId}:tool:${toolName}:path:${path}`)
 }
 
 /** Build a deny hook response */
@@ -261,9 +315,10 @@ export class PermissionServer extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       this.server = createServer((req, res) => this._handleRequest(req, res))
+      let attempts = 0
 
       this.server.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') {
+        if (err.code === 'EADDRINUSE' && attempts++ < 25) {
           log(`Port ${this.port} in use, trying ${this.port + 1}`)
           this.port++
           this.server!.listen(this.port, '127.0.0.1')
@@ -273,11 +328,13 @@ export class PermissionServer extends EventEmitter {
         }
       })
 
-      this.server.listen(this.port, '127.0.0.1', () => {
+      this.server.on('listening', () => {
         this._actualPort = this.port
         log(`Permission server listening on 127.0.0.1:${this.port}`)
         resolve(this.port)
       })
+
+      this.server.listen(this.port, '127.0.0.1')
     })
   }
 
@@ -407,8 +464,15 @@ export class PermissionServer extends EventEmitter {
 
     // Handle scoped "allow always" decisions
     if (decision === 'allow-session') {
-      const key = `session:${sessionId}:tool:${toolName}`
-      this.trackScopedAllow(pending.runToken, key)
+      const scopedKeys = scopedAllowKeysForTool(pending.toolRequest)
+      if (scopedKeys.length === 0) {
+        log(`Rejected unscoped allow-session for ${toolName}`)
+        pending.resolve({ decision: 'deny', reason: 'No scoped target available for session allow' })
+        return true
+      }
+      for (const key of scopedKeys) {
+        this.trackScopedAllow(pending.runToken, key)
+      }
       log(`Session-allowed ${toolName} for session ${sessionId.substring(0, 8)}…`)
     } else if (decision === 'allow-domain') {
       const domain = extractDomain(pending.toolRequest.tool_input?.url)
@@ -445,10 +509,17 @@ export class PermissionServer extends EventEmitter {
       ]
     }
 
-    // Edit, Write, MultiEdit, mcp__* — session-scoped allow is safe
+    const paths = extractToolPaths(toolName, toolInput, process.cwd())
+    if (FILE_PERMISSION_TOOLS.has(toolName) && paths.length === 0) {
+      return [
+        { id: 'allow', label: 'Allow Once', kind: 'allow' },
+        { id: 'deny', label: 'Deny', kind: 'deny' },
+      ]
+    }
+    const scopedLabel = paths.length > 1 ? 'Allow for Files' : paths.length === 1 ? 'Allow for File' : 'Allow for Session'
     return [
       { id: 'allow', label: 'Allow Once', kind: 'allow' },
-      { id: 'allow-session', label: 'Allow for Session', kind: 'allow' },
+      { id: 'allow-session', label: scopedLabel, kind: 'allow' },
       { id: 'deny', label: 'Deny', kind: 'deny' },
     ]
   }
@@ -595,8 +666,8 @@ export class PermissionServer extends EventEmitter {
     const sessionId = toolRequest.session_id
     const toolName = toolRequest.tool_name
 
-    // Check session-scoped allow
-    if (this.scopedAllows.has(`session:${sessionId}:tool:${toolName}`)) {
+    const scopedToolKeys = scopedAllowKeysForTool(toolRequest)
+    if (scopedToolKeys.length > 0 && scopedToolKeys.every((key) => this.scopedAllows.has(key))) {
       if (DEBUG) log(`Auto-allowing ${toolName} (session-allowed)`)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(allowResponse('Allowed for session by user')))

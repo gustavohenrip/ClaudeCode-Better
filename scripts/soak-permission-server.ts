@@ -174,7 +174,7 @@ async function main() {
       const resA2 = await postJsonWithRetry(runAUrl, buildPayload({
         sessionId,
         toolName: 'Write',
-        toolInput: { file_path: `/tmp/a2-${cycle}.txt`, content: 'x' },
+        toolInput: { file_path: `/tmp/a1-${cycle}.txt`, content: 'x' },
         toolUseId: stepA2,
       }))
       totalLatencyMs += resA2.durationMs
@@ -182,6 +182,36 @@ async function main() {
       if (promptCount > beforeA2) unexpectedPromptCount++
       if (resA2.status !== 200 || extractDecision(resA2.body) !== 'allow') failures++
       promptDecisionByUseId.delete(stepA2)
+
+      const stepA3 = `a3-${cycle}`
+      promptDecisionByUseId.set(stepA3, 'deny')
+      const beforeA3 = promptCount
+      const resA3 = await postJsonWithRetry(runAUrl, buildPayload({
+        sessionId,
+        toolName: 'Write',
+        toolInput: { file_path: `/tmp/a3-${cycle}.txt`, content: 'x' },
+        toolUseId: stepA3,
+      }))
+      totalLatencyMs += resA3.durationMs
+      requests++
+      if (promptCount === beforeA3) missingPromptCount++
+      if (resA3.status !== 200 || extractDecision(resA3.body) !== 'deny') failures++
+      promptDecisionByUseId.delete(stepA3)
+
+      const stepA4 = `a4-${cycle}`
+      promptDecisionByUseId.set(stepA4, 'allow-session')
+      const beforeA4 = promptCount
+      const resA4 = await postJsonWithRetry(runAUrl, buildPayload({
+        sessionId,
+        toolName: 'Write',
+        toolInput: { content: 'x' },
+        toolUseId: stepA4,
+      }))
+      totalLatencyMs += resA4.durationMs
+      requests++
+      if (promptCount === beforeA4) missingPromptCount++
+      if (resA4.status !== 200 || extractDecision(resA4.body) !== 'deny') failures++
+      promptDecisionByUseId.delete(stepA4)
       server.unregisterRun(runA)
 
       const runB = server.registerRun(tabId, `req-b-${cycle}`, sessionId)

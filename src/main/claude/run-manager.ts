@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { join, dirname, delimiter } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import { StreamParser } from '../stream-parser'
-import { normalize, normalizeCodex } from './event-normalizer'
+import { normalize, normalizeCodex, createNormalizerState, type NormalizerState } from './event-normalizer'
 import { log as _log } from '../logger'
 import { getCliEnv } from '../cli-env'
 import { getScreenToolsMcpConfig } from '../mcp/screen-tools-config'
@@ -59,16 +59,29 @@ const SAFE_TOOLS = [
   'browser_info',
 ]
 
-// All tools to pre-approve when NO hook server is available (fallback path).
-// Includes safe + dangerous tools so nothing is silently denied.
-const DEFAULT_ALLOWED_TOOLS = [
-  'Bash', 'Edit', 'Write', 'MultiEdit',
+const INTERACTION_TOOLS = [
   'AskUserQuestion',
+]
+
+const COMPUTER_USE_TOOLS = [
   'move_mouse', 'click_mouse', 'scroll_mouse', 'drag_mouse',
   'type_text', 'press_key',
   'browser_navigate', 'browser_execute_js', 'browser_click', 'browser_type', 'browser_close',
-  ...SAFE_TOOLS,
 ]
+
+const HOOK_ALLOWED_TOOLS = [
+  ...SAFE_TOOLS,
+  ...INTERACTION_TOOLS,
+  ...COMPUTER_USE_TOOLS,
+]
+
+const DEFAULT_ALLOWED_TOOLS = [
+  ...HOOK_ALLOWED_TOOLS,
+]
+
+function uniqueTools(tools: string[]): string[] {
+  return [...new Set(tools.filter(Boolean))]
+}
 
 function log(msg: string): void {
   _log('RunManager', msg)
@@ -102,6 +115,7 @@ export interface RunHandle {
   model?: string
   codexTextLengths: Map<string, number>
   codexFallbackUsage?: UsageData
+  normalizerState: NormalizerState
 }
 
 /**
@@ -135,6 +149,7 @@ export class RunManager extends EventEmitter {
     const candidates = [
       '/usr/local/bin/claude',
       '/opt/homebrew/bin/claude',
+      join(homedir(), '.local/bin/claude'),
       join(homedir(), '.npm-global/bin/claude'),
     ]
 
@@ -458,11 +473,7 @@ export class RunManager extends EventEmitter {
     let args: string[]
 
     if (isCodex) {
-      if (options.sessionId) {
-        args = ['exec', 'resume', options.sessionId, '-', '--json']
-      } else {
-        args = ['exec', '--json', '-']
-      }
+      args = ['exec', '--cd', cwd, '--json']
       const screenToolsMcp = getScreenToolsMcpConfig()
       args.push('-c', `mcp_servers.${screenToolsMcp.name}.command=${this._toTomlString(screenToolsMcp.command)}`)
       args.push('-c', `mcp_servers.${screenToolsMcp.name}.args=${this._toTomlArray(screenToolsMcp.args)}`)
@@ -490,6 +501,11 @@ export class RunManager extends EventEmitter {
       }
       args.push('-c', 'model_reasoning_summary="auto"')
       args.push('-c', 'hide_agent_reasoning=false')
+      if (options.sessionId) {
+        args.push('resume', options.sessionId, '-')
+      } else {
+        args.push('-')
+      }
     } else {
       args = [
         '-p',
@@ -498,6 +514,7 @@ export class RunManager extends EventEmitter {
         '--verbose',
         '--include-partial-messages',
         '--permission-mode', options.cliPermissionMode || 'default',
+        '--tools', 'default',
       ]
       if (isOpenClaude && options.openRouter?.enabled) {
         args.push('--provider', 'openai')
@@ -522,23 +539,11 @@ export class RunManager extends EventEmitter {
       if (options.hookSettingsPath) {
         args.push('--settings', options.hookSettingsPath)
       }
-      if (isOpenClaude) {
-        if (options.allowedTools && options.allowedTools.length > 0) {
-          args.push('--allowedTools', options.allowedTools.join(','))
-        }
-      } else if (options.hookSettingsPath) {
-        const safeAllowed = [
-          ...SAFE_TOOLS,
-          ...(options.allowedTools || []),
-        ]
-        args.push('--allowedTools', safeAllowed.join(','))
-      } else {
-        const allAllowed = [
-          ...DEFAULT_ALLOWED_TOOLS,
-          ...(options.allowedTools || []),
-        ]
-        args.push('--allowedTools', allAllowed.join(','))
-      }
+      const allowedTools = uniqueTools([
+        ...(options.hookSettingsPath ? HOOK_ALLOWED_TOOLS : DEFAULT_ALLOWED_TOOLS),
+        ...(options.allowedTools || []),
+      ])
+      args.push('--allowedTools', allowedTools.join(','))
       if (options.maxTurns) {
         args.push('--max-turns', String(options.maxTurns))
       }
@@ -588,6 +593,7 @@ export class RunManager extends EventEmitter {
       keepAlive: flags?.keepAlive ?? false,
       model: options.model,
       codexTextLengths: new Map(),
+      normalizerState: createNormalizerState(),
     }
 
     // ─── stdout → NDJSON parser → normalizer → events ───
@@ -625,7 +631,7 @@ export class RunManager extends EventEmitter {
 
       this.emit('raw', handle.runId, raw)
 
-      const normalized = isCodex ? normalizeCodex(raw) : normalize(raw)
+      const normalized = isCodex ? normalizeCodex(raw) : normalize(raw, handle.normalizerState)
       for (const evt of normalized) {
         if (evt.type === 'tool_call') handle.toolCallCount++
         if (isCodex && evt.type === 'text_chunk') {
@@ -743,6 +749,7 @@ export class RunManager extends EventEmitter {
     handle.permissionDenials = []
     handle.codexTextLengths.clear()
     handle.codexFallbackUsage = undefined
+    handle.normalizerState.blockToolIds.clear()
 
     const userMessage = JSON.stringify({
       type: 'user',

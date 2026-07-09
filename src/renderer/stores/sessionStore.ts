@@ -8,6 +8,7 @@ const notificationSrc = new URL('../../../resources/notification.mp3', import.me
 // ─── Known models ───
 
 export const AVAILABLE_MODELS = [
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
   { id: 'claude-opus-4-7', label: 'Opus 4.7' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
@@ -28,7 +29,24 @@ type ModelOption = { id: string; label: string }
 
 export type CodexReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh'
 
-export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-7', 'claude-opus-4-6'])
+export const MODELS_SUPPORTING_MAX_EFFORT = new Set(['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6'])
+
+export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-opus-4-8': 1000000,
+  'claude-opus-4-7': 1000000,
+  'claude-opus-4-6': 1000000,
+  'claude-sonnet-4-6': 1000000,
+  'claude-haiku-4-5-20251001': 200000,
+}
+
+export function getModelContextWindow(modelId?: string | null): number {
+  if (!modelId) return 200000
+  if (MODEL_CONTEXT_WINDOWS[modelId]) return MODEL_CONTEXT_WINDOWS[modelId]
+  for (const key of Object.keys(MODEL_CONTEXT_WINDOWS)) {
+    if (modelId.includes(key)) return MODEL_CONTEXT_WINDOWS[key]
+  }
+  return 200000
+}
 
 export function getEffectiveModelId(preferredModel: string | null): string {
   return preferredModel ?? AVAILABLE_MODELS[0].id
@@ -153,7 +171,7 @@ interface State {
   buildYourOwn: () => void
   resumeSession: (sessionId: string, title?: string, projectPath?: string, projectDir?: string, provider?: Provider) => Promise<string>
   addSystemMessage: (content: string) => void
-  sendMessage: (prompt: string, projectPath?: string) => void
+  sendMessage: (prompt: string, projectPath?: string, opts?: { keepQuestions?: boolean }) => void
   respondPermission: (tabId: string, questionId: string, optionId: string) => void
   respondUserQuestion: (tabId: string, questionId: string, answers: AskUserQuestionAnswer[], selectedIds?: string[], otherText?: string, answerText?: string, cancelled?: boolean) => Promise<boolean>
   addDirectory: (dir: string) => void
@@ -338,10 +356,15 @@ function findLastAssistantIndex(messages: Message[], streamId?: string): number 
   const lastUserIdx = findLastUserIndex(messages)
   for (let i = messages.length - 1; i > lastUserIdx; i--) {
     const m = messages[i]
-    if (m.role !== 'assistant' || m.toolName) continue
-    if (streamId && m.streamId !== streamId) continue
-    if (!streamId && m.streamId) continue
-    return i
+    if (m.role === 'assistant' && !m.toolName) {
+      if (streamId) {
+        if (m.streamId === streamId) return i
+        continue
+      }
+      if (m.streamId) continue
+      return i
+    }
+    if (!streamId && (m.role === 'tool' || m.role === 'thinking')) break
   }
   return -1
 }
@@ -359,10 +382,15 @@ function findLastThinkingIndex(messages: Message[], streamId?: string): number {
   const lastUserIdx = findLastUserIndex(messages)
   for (let i = messages.length - 1; i > lastUserIdx; i--) {
     const m = messages[i]
-    if (m.role !== 'thinking') continue
-    if (streamId && m.streamId !== streamId) continue
-    if (!streamId && m.streamId) continue
-    return i
+    if (m.role === 'thinking') {
+      if (streamId) {
+        if (m.streamId === streamId) return i
+        continue
+      }
+      if (m.streamId) continue
+      return i
+    }
+    if (!streamId) break
   }
   return -1
 }
@@ -880,27 +908,29 @@ export const useSessionStore = create<State>((set, get) => ({
   // ─── Ask User Question response ───
 
   respondUserQuestion: async (tabId, questionId, answers, selectedIds = [], otherText, answerText, cancelled = false) => {
-    const payload = { tabId, questionId, selectedIds, otherText, answerText, answers, cancelled }
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === tabId
+          ? { ...t, askUserQuestions: t.askUserQuestions.filter((q) => q.questionId !== questionId) }
+          : t
+      ),
+    }))
     try {
-      const success = await window.clui.respondUserQuestion(payload)
-      if (!success) return false
-      set((s) => ({
-        tabs: s.tabs.map((t) => {
-          if (t.id !== tabId) return t
-          const remaining = t.askUserQuestions.filter((q) => q.questionId !== questionId)
-          return {
-            ...t,
-            askUserQuestions: remaining,
-            currentActivity: remaining.length > 0
-              ? `Waiting for response...`
-              : 'Working...',
-          }
-        }),
-      }))
-      return true
-    } catch {
-      return false
-    }
+      await window.clui.respondUserQuestion({ tabId, questionId, selectedIds, otherText, answerText, answers, cancelled })
+    } catch {}
+    if (cancelled) return true
+    const formatted = answers
+      .map((a) => {
+        const value = a.answerText || a.selectedLabels.join(', ') || a.otherText || ''
+        return value ? `"${a.question}"="${value}"` : ''
+      })
+      .filter(Boolean)
+      .join(', ')
+    const prompt = formatted
+      ? `User has answered your questions: ${formatted}. You can now continue with the user's answers in mind.`
+      : (answerText || '')
+    if (prompt.trim()) get().sendMessage(prompt, undefined, { keepQuestions: true })
+    return true
   },
 
   // ─── Directory management ───
@@ -986,7 +1016,7 @@ export const useSessionStore = create<State>((set, get) => ({
 
   // ─── Send ───
 
-  sendMessage: (prompt, projectPath) => {
+  sendMessage: (prompt, projectPath, opts) => {
     const { activeTabId, tabs, staticInfo } = get()
     const tab = tabs.find((t) => t.id === activeTabId)
     // Use explicitly chosen directory, otherwise fall back to user home
@@ -1043,7 +1073,7 @@ export const useSessionStore = create<State>((set, get) => ({
             queuedPrompts: [],
             permissionQueue: [],
             permissionDenied: null,
-            askUserQuestions: [],
+            askUserQuestions: opts?.keepQuestions ? withEffectiveBase.askUserQuestions : [],
             messages: [
               ...withEffectiveBase.messages,
               { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now(), attachments: t.attachments.length > 0 ? [...t.attachments] : undefined },
@@ -1186,6 +1216,25 @@ export const useSessionStore = create<State>((set, get) => ({
             break
           }
 
+          case 'tool_result': {
+            const msgs3 = [...updated.messages]
+            let idx3 = -1
+            for (let i = msgs3.length - 1; i >= 0; i--) {
+              const m = msgs3[i]
+              if (m.role === 'tool' && m.toolId && m.toolId === event.toolUseId) { idx3 = i; break }
+            }
+            if (idx3 !== -1) {
+              const t = msgs3[idx3]
+              msgs3[idx3] = {
+                ...t,
+                toolResult: event.content,
+                toolStatus: event.isError ? 'error' : (t.toolStatus === 'running' ? 'completed' : t.toolStatus),
+              }
+              updated.messages = msgs3
+            }
+            break
+          }
+
           case 'task_update': {
             if (event.message?.content) {
               const lastUserIdx = (() => {
@@ -1248,7 +1297,9 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.activeRequestId = null
             updated.currentActivity = ''
             updated.permissionQueue = []
-            updated.askUserQuestions = []
+            updated.messages = updated.messages.map((m) =>
+              m.role === 'tool' && m.toolStatus === 'running' ? { ...m, toolStatus: 'completed' as const } : m
+            )
             updated.lastResult = {
               totalCostUsd: event.costUsd,
               durationMs: event.durationMs,
@@ -1260,12 +1311,12 @@ export const useSessionStore = create<State>((set, get) => ({
               const usage = normalizeUsageData(event.usage)
               const delta = usageToTokenUsage(usage)
               updated.tokenUsage = {
-                input: (updated.tokenUsage?.input || 0) + delta.input,
+                input: delta.input,
                 output: (updated.tokenUsage?.output || 0) + delta.output,
-                cacheRead: (updated.tokenUsage?.cacheRead || 0) + delta.cacheRead,
-                cacheCreation: (updated.tokenUsage?.cacheCreation || 0) + delta.cacheCreation,
+                cacheRead: delta.cacheRead,
+                cacheCreation: delta.cacheCreation,
                 reasoning: (updated.tokenUsage?.reasoning || 0) + delta.reasoning,
-                total: (updated.tokenUsage?.total || 0) + delta.total,
+                total: delta.total || (delta.input + delta.output),
               }
             }
             // ── Final text fallback ──
@@ -1313,7 +1364,9 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.askUserQuestions = []
             updated.permissionDenied = null
             updated.messages = [
-              ...updated.messages,
+              ...updated.messages.map((m) =>
+                m.role === 'tool' && m.toolStatus === 'running' ? { ...m, toolStatus: 'error' as const } : m
+              ),
               { id: nextMsgId(), role: 'system', content: `Error: ${event.message}`, timestamp: Date.now() },
             ]
             break
@@ -1326,7 +1379,9 @@ export const useSessionStore = create<State>((set, get) => ({
             updated.askUserQuestions = []
             updated.permissionDenied = null
             updated.messages = [
-              ...updated.messages,
+              ...updated.messages.map((m) =>
+                m.role === 'tool' && m.toolStatus === 'running' ? { ...m, toolStatus: 'error' as const } : m
+              ),
               {
                 id: nextMsgId(),
                 role: 'system',

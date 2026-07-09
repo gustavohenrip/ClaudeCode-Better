@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { ShieldWarning, Terminal, PencilSimple, Globe, Wrench } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
 import { useColors } from '../theme'
+import { DiffViewer } from './DiffViewer'
 import type { PermissionRequest } from '../../shared/types'
 
 interface Props {
@@ -15,6 +16,8 @@ const TOOL_ICONS: Record<string, React.ReactNode> = {
   Bash: <Terminal size={14} />,
   Edit: <PencilSimple size={14} />,
   Write: <PencilSimple size={14} />,
+  MultiEdit: <PencilSimple size={14} />,
+  NotebookEdit: <PencilSimple size={14} />,
   WebSearch: <Globe size={14} />,
   WebFetch: <Globe size={14} />,
 }
@@ -37,7 +40,7 @@ function formatInput(input?: Record<string, unknown>): string | null {
       continue
     }
     const val = typeof value === 'string' ? value : JSON.stringify(value)
-    const truncated = val.length > 120 ? val.substring(0, 117) + '...' : val
+    const truncated = val.length > 400 ? val.substring(0, 397) + '...' : val
     parts.push(`${key}: ${truncated}`)
   }
   return parts.join('\n')
@@ -58,7 +61,11 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
     respondPermission(tabId, permission.questionId, optionId)
   }
 
-  const inputPreview = formatInput(permission.toolInput)
+  const tool = permission.toolTitle
+  const input = permission.toolInput
+  const isDiffTool = tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit' || tool === 'NotebookEdit'
+  const bashCmd = tool === 'Bash' && input && typeof input.command === 'string' ? (input.command as string) : null
+  const inputPreview = !isDiffTool && !bashCmd ? formatInput(input) : null
 
   return (
     <motion.div
@@ -104,13 +111,28 @@ export function PermissionCard({ tabId, permission, queueLength = 1 }: Props) {
             </p>
           )}
 
+          {isDiffTool && input && (
+            <div className="mb-2">
+              <DiffViewer toolName={tool} toolInput={JSON.stringify(input)} />
+            </div>
+          )}
+
+          {bashCmd && (
+            <pre
+              className="text-[10px] leading-[1.5] px-2 py-1.5 rounded-md overflow-x-auto mb-2"
+              style={{ background: colors.codeBg, color: colors.textSecondary, whiteSpace: 'pre-wrap', maxHeight: 160 }}
+            >
+              {bashCmd}
+            </pre>
+          )}
+
           {inputPreview && (
             <pre
               className="text-[10px] leading-[1.4] px-2 py-1.5 rounded-md overflow-x-auto whitespace-pre-wrap break-all mb-2"
               style={{
                 background: colors.codeBg,
                 color: colors.textSecondary,
-                maxHeight: 80,
+                maxHeight: 120,
               }}
             >
               {inputPreview}

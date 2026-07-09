@@ -5,7 +5,7 @@ import { PermissionServer, maskSensitiveFields } from '../hooks/permission-serve
 import type { HookToolRequest, PermissionOption } from '../hooks/permission-server'
 import { isRetryableError } from './retry-manager'
 import { log as _log } from '../logger'
-import { NativeAskUserQuestionHarness, normalizeAskUserQuestionToolInput, type AskUserQuestionResolvePayload, type ResolvedAskUserQuestion } from '../native-harness/ask-user-question'
+import { NativeAskUserQuestionHarness, normalizeAskUserQuestionToolInput, type AskUserQuestionResolvePayload } from '../native-harness/ask-user-question'
 import type {
   TabStatus,
   TabRegistryEntry,
@@ -485,6 +485,7 @@ export class ControlPlane extends EventEmitter {
   private _clearRequestState(requestId: string): void {
     this.askQuestionToolBuffers.delete(requestId)
     this.askUserQuestionHarness.clearRequest(requestId)
+    this.lastRequestOptions.delete(requestId)
   }
 
   /**
@@ -665,7 +666,7 @@ export class ControlPlane extends EventEmitter {
 
     Promise.race([
       this.hookServerReady,
-      new Promise<void>((r) => setTimeout(r, 150)),
+      new Promise<void>((r) => setTimeout(r, 2500)),
     ]).then(() => {
       if (!this.tabs.has(tabId)) {
         this.initRequestIds.delete(requestId)
@@ -905,7 +906,7 @@ export class ControlPlane extends EventEmitter {
 
     await Promise.race([
       this.hookServerReady,
-      new Promise<void>((r) => setTimeout(r, 150)),
+      new Promise<void>((r) => setTimeout(r, 2500)),
     ])
 
     if (!options.sessionId && tab.claudeSessionId) {
@@ -1123,48 +1124,8 @@ export class ControlPlane extends EventEmitter {
   }
 
   respondToUserQuestion(payload: AskUserQuestionResolvePayload): boolean {
-    const tabId = payload.tabId
-    const tab = this.tabs.get(tabId)
-    if (!tab?.activeRequestId) return false
-    const requestId = tab.activeRequestId
-    let result: ResolvedAskUserQuestion | null
-    try {
-      result = this.askUserQuestionHarness.resolve({ ...payload, requestId })
-    } catch (err) {
-      log(`respondToUserQuestion failed: ${(err as Error).message}`)
-      return false
-    }
-    if (!result) return false
-    const writeMessage = (message: object): boolean => {
-      if (this.ptyRuns.has(requestId)) {
-        return this.ptyRunManager.writeToStdin(requestId, JSON.stringify(message) + '\n')
-      }
-      return this.runManager.writeToStdin(requestId, message)
-    }
-    if (result.toolUseId) {
-      const success = writeMessage({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            tool_use_id: result.toolUseId,
-            content: result.content,
-          }],
-        },
-      })
-      if (success) this.askUserQuestionHarness.complete(tabId, payload.questionId)
-      return success
-    }
-    const success = writeMessage({
-      type: 'user',
-      message: {
-        role: 'user',
-        content: [{ type: 'text', text: result.content }],
-      },
-    })
-    if (success) this.askUserQuestionHarness.complete(tabId, payload.questionId)
-    return success
+    this.askUserQuestionHarness.complete(payload.tabId, payload.questionId)
+    return true
   }
 
   // ─── Health ───
